@@ -807,18 +807,19 @@ func TestGitHTTPSClone(t *testing.T) {
 	}
 }
 
-// A name whose repositories are still on disk (its account was deleted)
-// cannot be taken by a new account, which would inherit them.
+// A deleted user's name cannot be taken by a new account, which would
+// inherit their repositories, even when the repositories are gone too.
 func TestDeletedUserNameNotReused(t *testing.T) {
 	e := newTestEnv(t)
 	if err := e.s.store.Delete("bob"); err != nil {
 		t.Fatal(err)
 	}
+	os.RemoveAll(filepath.Join(e.data, "repos", "bob"))
 	code, _, _ := e.s.store.CreateInvite("alice", false, time.Hour)
 	form := url.Values{"code": {code}, "username": {"bob"}, "password": {"bob-password-456"},
 		"password2": {"bob-password-456"}, "key": {newTestKey(t)}}
 	if status, body := e.post(&http.Client{}, "/signup", form, ""); status == 200 || !strings.Contains(body, "taken") {
-		t.Fatalf("signup as deleted bob (whose repos remain): %d", status)
+		t.Fatalf("signup as deleted bob: %d", status)
 	}
 }
 

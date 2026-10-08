@@ -289,7 +289,7 @@ sudo gitserverctl user key del NAME KEY-ID
 sudo gitserverctl user del NAME                       # delete the account (repos stay on disk)
 ```
 
-Changing a password or 2FA ends all of that user's sessions immediately. Deleting a user revokes their SSH access at once. Their repositories stay in `/var/lib/gitserver/repos/NAME/` until you remove them. While that folder exists, nobody can sign up with the name, because the new account would own those repositories. `gitserverctl user add NAME` warns about it but goes ahead, so you can hand the repositories to a new account on purpose.
+Changing a password or 2FA ends all of that user's sessions immediately. Deleting a user revokes their SSH access at once. Their repositories stay in `/var/lib/gitserver/repos/NAME/` until you remove them. A user name can be taken only once: after deletion it stays reserved for good, so nobody can take over the old account's repositories or invites. To give the repositories to someone else, move the folder to their name.
 
 ### Invites
 
@@ -309,7 +309,7 @@ sudo gitserverctl repo public '~owner/name'
 sudo gitserverctl repo private '~owner/name'
 ```
 
-Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME.git` (owned by `git:git`). Create the user first, or use `user add`, which warns about the existing folder; web signup refuses such names. A repo is public exactly when the file `git-daemon-export-ok` exists inside it, and its description is the file `description`.
+Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME.git` (owned by `git:git`). Create the user first, or use `user add`, which warns about the existing folder; web signup refuses such names. Names that ever had an account can't be used again. A repo is public exactly when the file `git-daemon-export-ok` exists inside it, and its description is the file `description`.
 
 ### Logs
 
@@ -375,9 +375,9 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`sealTOTP`](secrets.go#L161), [`openTOTP`](secrets.go#L170).
   - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L13), [`secret.key`](deploy/install.sh#L396), [`run`](deploy/gitserverctl#L16).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](secrets.go#L159).
-  - a stolen database or backup holds only ciphertext Code: [`Backup`](store.go#L161).
+  - a stolen database or backup holds only ciphertext Code: [`Backup`](store.go#L162).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`loadSecretBox`](secrets.go#L79).
-  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`encryptTOTPSecrets`](secrets.go#L189), [`purgeFreedPages`](store.go#L151).
+  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`encryptTOTPSecrets`](secrets.go#L189), [`purgeFreedPages`](store.go#L152).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](auth.go#L321), [`newLimiter`](server.go#L76), [`ipKey`](server.go#L320), [`passwordOK`](web.go#L244).
 - **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. Code: [`codeAlerts`](auth.go#L376), [`alerts.take`](web.go#L267).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](auth.go#L226).
@@ -385,7 +385,8 @@ Every claim below links to the code that implements it. On this server and on Gi
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](auth.go#L192).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](auth.go#L222), [`withSession`](server.go#L352).
 - **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](server.go#L442), [`NewCrossOriginProtection`](server.go#L168), [`safeNext`](web.go#L196).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](store.go#L479), [`RedeemInvite`](store.go#L552).
+- **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](store.go#L177), [`errNameUsed`](store.go#L61).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](store.go#L555), [`RedeemInvite`](store.go#L628).
 
 ### Git
 
@@ -413,7 +414,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L22).
 - **Nothing extra faces the internet:** gitserver, Anubis and its metrics listen only on `127.0.0.1`. Code: [`127.0.0.1:8080`](deploy/gitserver.service#L14), [`BIND`](deploy/anubis.env#L4), [`METRICS_BIND`](deploy/anubis.env#L10).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L391), [`0o600`](store.go#L112), [`secure_delete`](store.go#L119).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L391), [`0o600`](store.go#L113), [`secure_delete`](store.go#L120).
 
 ---
 

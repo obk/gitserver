@@ -161,7 +161,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "Usernames are 1-32 characters: lowercase letters, digits, - and _, starting with a letter or digit.")
 		return
 	}
-	if _, err := s.store.Get(name); err == nil || ownerDirExists(s.reposDir, name) {
+	if used, err := s.store.NameUsed(name); err != nil || used || ownerDirExists(s.reposDir, name) {
 		fail(http.StatusBadRequest, "That username is taken.")
 		return
 	}
@@ -235,7 +235,7 @@ func (s *Server) handleSignupConfirm(w http.ResponseWriter, r *http.Request) {
 		s.pending.delete(token)
 		msg := "This invite link is invalid, expired or has already been used."
 		switch {
-		case errors.Is(err, errUserExists):
+		case errors.Is(err, errUserExists), errors.Is(err, errNameUsed):
 			msg = "That username was taken in the meantime. Open the invite link again."
 		case errors.Is(err, errKeyInUse):
 			msg = "That SSH key was registered to another account in the meantime. Open the invite link again."

@@ -118,6 +118,56 @@ func TestStoreConstraints(t *testing.T) {
 	if err := s.Delete("a"); !errors.Is(err, errNoUser) {
 		t.Fatalf("delete missing user: %v", err)
 	}
+	// A name can be taken only once, even after the account is deleted.
+	if err := s.Create(&User{Name: "a"}); !errors.Is(err, errNameUsed) {
+		t.Fatalf("deleted name reused: %v", err)
+	}
+	if used, err := s.NameUsed("a"); !used || err != nil {
+		t.Fatalf("NameUsed(a) = %v, %v", used, err)
+	}
+	if used, _ := s.NameUsed("never"); used {
+		t.Fatal("unused name reported as used")
+	}
+}
+
+// Databases from before used_names get it on open, filled with the names
+// known so far: users, invites and repository folders of deleted users.
+func TestUsedNamesMigration(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "alice"})
+	code, _, _ := s.CreateInvite("alice", false, time.Hour)
+	if err := s.RedeemInvite(hashToken(code), &User{Name: "bob"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Delete("bob")
+	for _, stmt := range []string{`DROP TRIGGER users_name_used`, `DROP TABLE used_names`} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	os.MkdirAll(filepath.Join(dir, "repos", "carol"), 0o750) // carol was deleted before the upgrade
+
+	s, err = openStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, name := range []string{"alice", "bob", "carol"} {
+		if used, err := s.NameUsed(name); !used || err != nil {
+			t.Errorf("%s not recorded as used: %v", name, err)
+		}
+	}
+	if err := s.Create(&User{Name: "dave"}); err != nil {
+		t.Fatal(err)
+	}
+	if used, _ := s.NameUsed("dave"); !used {
+		t.Fatal("new user not recorded by the trigger")
+	}
 }
 
 // Many writers (goroutines and separate Store instances, like the web

@@ -58,6 +58,7 @@ var (
 	errTooManyKeys   = errors.New("too many SSH keys; delete some first")
 	errNoUser        = errors.New("no such user")
 	errUserExists    = errors.New("user already exists")
+	errNameUsed      = errors.New("this user name was used before and can't be taken again")
 	errInviteInvalid = errors.New("invite is invalid, expired or already used")
 )
 
@@ -169,6 +170,60 @@ func (s *Store) Backup(path string) error {
 	return os.Chmod(path, 0o600)
 }
 
+// usedNamesSchema records every user name ever created, so a name can be
+// taken only once: repositories and invites refer to users by name, and a
+// new account under an old name would inherit them. The trigger fills it on
+// every insert, even by an older gitserver that does not know the table.
+var usedNamesSchema = []string{
+	`CREATE TABLE IF NOT EXISTS used_names (name TEXT PRIMARY KEY) STRICT`,
+	`CREATE TRIGGER IF NOT EXISTS users_name_used AFTER INSERT ON users
+		BEGIN INSERT OR IGNORE INTO used_names (name) VALUES (NEW.name); END`,
+}
+
+// addUsedNames creates used_names and fills it with the names known so far:
+// current users, users named in invites, and owners of repository folders
+// (which remain after an account is deleted).
+func addUsedNames(tx *sql.Tx, dataDir string) error {
+	for _, stmt := range usedNamesSchema {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT OR IGNORE INTO used_names (name) SELECT name FROM users`,
+		`INSERT OR IGNORE INTO used_names (name) SELECT used_by FROM invites WHERE used_by != ''`,
+		`INSERT OR IGNORE INTO used_names (name) SELECT created_by FROM invites WHERE created_by != 'cli'`,
+		`INSERT OR IGNORE INTO used_names (name) SELECT invited_by FROM users WHERE invited_by NOT IN ('', 'cli')`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "repos"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() && userNameRe.MatchString(e.Name()) {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO used_names (name) VALUES (?)`, e.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ensureUsedNames adds used_names to a database created before it existed.
+// It only writes when the table is missing, so opening the store (which
+// sshd does for every connection) stays read-only otherwise.
+func (s *Store) ensureUsedNames(dataDir string) error {
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'users_name_used'`).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	return s.tx(func(tx *sql.Tx) error { return addUsedNames(tx, dataDir) })
+}
+
 // migrate creates the schema and, on first start, imports the old db.json.
 func (s *Store) migrate(dataDir string) error {
 	var version int
@@ -176,7 +231,7 @@ func (s *Store) migrate(dataDir string) error {
 		return err
 	}
 	if version == schemaVersion {
-		return nil
+		return s.ensureUsedNames(dataDir)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -193,9 +248,17 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
+		for _, stmt := range usedNamesSchema {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
 		var err error
 		if imported, err = importJSON(tx, jsonPath); err != nil {
 			return fmt.Errorf("importing %s: %w", jsonPath, err)
+		}
+		if err := addUsedNames(tx, dataDir); err != nil {
+			return err
 		}
 		_, err = tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
 		return err
@@ -308,6 +371,12 @@ func insertUser(tx *sql.Tx, u *User) error {
 	if n > 0 {
 		return errUserExists
 	}
+	if err := tx.QueryRow(`SELECT count(*) FROM used_names WHERE name = ?`, u.Name).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return errNameUsed
+	}
 	if u.Created.IsZero() {
 		u.Created = time.Now().UTC()
 	}
@@ -343,6 +412,13 @@ func insertInvite(tx *sql.Tx, i *Invite) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.Hash, i.CreatedBy, unix(i.Created), unix(i.Expires), i.Admin, i.UsedBy, unix(i.Used))
 	return err
+}
+
+// NameUsed reports whether name belongs, or once belonged, to an account.
+func (s *Store) NameUsed(name string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM used_names WHERE name = ?`, name).Scan(&n)
+	return n > 0, err
 }
 
 // Get returns a freshly loaded copy of the user.

@@ -222,6 +222,11 @@ func cmdUser(args []string) error {
 		if _, err := store.Get(name); err == nil {
 			return errUserExists
 		}
+		if used, err := store.NameUsed(name); err != nil {
+			return err
+		} else if used {
+			return fmt.Errorf("%q: %w", name, errNameUsed)
+		}
 		if dir := filepath.Join(*data, "repos", name); ownerDirExists(filepath.Join(*data, "repos"), name) {
 			fmt.Fprintf(os.Stderr, "warning: %s exists; the new user %s will own every repository in it.\n", dir, name)
 		}
