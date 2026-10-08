@@ -43,12 +43,16 @@ type page struct {
 	CloneWeb string // HTTPS clone URL (public repositories only)
 	IsOwner  bool
 	Data     any
+	Flash    string // shown once at the top of the page (see setFlash)
 }
 
 func (s *Server) newPage(r *http.Request, title string, data any) *page {
 	p := &page{Site: s.cfg.SiteName, AssetVer: s.assetVer, Title: title, Path: r.URL.RequestURI(), User: currentUser(r), Data: data}
 	if sess := currentSession(r); sess != nil {
 		p.CSRF = sess.csrf
+		if c, err := r.Cookie(s.cookieName()); err == nil {
+			p.Flash = s.sessions.takeFlash(c.Value)
+		}
 	}
 	return p
 }

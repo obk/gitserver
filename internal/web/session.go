@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,8 +27,15 @@ type session struct {
 	// newCodes are recovery codes just generated for this session's user,
 	// shown once on the 2FA page (takeNewCodes) and then forgotten.
 	newCodes []string
-	created  time.Time
-	seen     time.Time
+	// flash is shown once, on the next page (takeFlash).
+	flash string
+	// For the sessions list (Settings -> security): ref names the session
+	// there without revealing its cookie; ip is the latest client address.
+	ref     string
+	ip      string
+	agent   string
+	created time.Time
+	seen    time.Time
 }
 
 type sessionStore struct {
@@ -74,16 +82,80 @@ func (s *sessionStore) takeNewCodes(id string) []string {
 	return codes
 }
 
-func (s *sessionStore) create(user, credFP, notice string) string {
+func (s *sessionStore) create(user, credFP, notice, ip, agent string) string {
 	id := account.RandomToken(32)
 	now := time.Now()
 	s.mu.Lock()
-	s.m[account.HashToken(id)] = &session{user: user, credFP: credFP, csrf: account.RandomToken(32), notice: notice, created: now, seen: now}
+	s.m[account.HashToken(id)] = &session{user: user, credFP: credFP, csrf: account.RandomToken(32), notice: notice,
+		ref: account.RandomToken(12), ip: ip, agent: agent, created: now, seen: now}
 	s.mu.Unlock()
 	return id
 }
 
-func (s *sessionStore) get(id string) (session, bool) {
+// setFlash keeps msg for the session with id until takeFlash.
+func (s *sessionStore) setFlash(id, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess := s.m[account.HashToken(id)]; sess != nil {
+		sess.flash = msg
+	}
+}
+
+// takeFlash returns and forgets the message set by setFlash.
+func (s *sessionStore) takeFlash(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.m[account.HashToken(id)]
+	if sess == nil {
+		return ""
+	}
+	msg := sess.flash
+	sess.flash = ""
+	return msg
+}
+
+// sessionInfo describes a session in the sessions list.
+type sessionInfo struct {
+	Ref, IP, Agent string
+	Created, Seen  time.Time
+	Current        bool
+}
+
+// list returns the live sessions of user, most recently active first;
+// current is the ID of the session asking, which is marked.
+func (s *sessionStore) list(user, current string) []sessionInfo {
+	now := time.Now()
+	currentKey := account.HashToken(current)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var list []sessionInfo
+	for k, sess := range s.m {
+		if sess.user != user || now.Sub(sess.created) > sessionMaxAge || now.Sub(sess.seen) > sessionIdle {
+			continue
+		}
+		list = append(list, sessionInfo{Ref: sess.ref, IP: sess.ip, Agent: describeAgent(sess.agent),
+			Created: sess.created, Seen: sess.seen, Current: k == currentKey})
+	}
+	slices.SortFunc(list, func(a, b sessionInfo) int { return b.Seen.Compare(a.Seen) })
+	return list
+}
+
+// deleteRef ends the session of user named ref in the sessions list, and
+// reports whether there was one. Other users' sessions are never touched.
+func (s *sessionStore) deleteRef(user, ref string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, sess := range s.m {
+		if sess.user == user && constantTimeEqual(sess.ref, ref) {
+			delete(s.m, k)
+			return true
+		}
+	}
+	return false
+}
+
+// get returns the session with id and marks it as seen now, from ip.
+func (s *sessionStore) get(id, ip string) (session, bool) {
 	key := account.HashToken(id)
 	now := time.Now()
 	s.mu.Lock()
@@ -97,6 +169,9 @@ func (s *sessionStore) get(id string) (session, bool) {
 		return session{}, false
 	}
 	sess.seen = now
+	if ip != "" {
+		sess.ip = ip
+	}
 	return *sess, true
 }
 
@@ -146,7 +221,7 @@ const (
 func (s *Server) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, err := r.Cookie(s.cookieName()); err == nil {
-			if sess, ok := s.sessions.get(c.Value); ok {
+			if sess, ok := s.sessions.get(c.Value, s.clientIP(r)); ok {
 				u, err := s.store.Get(sess.user)
 				if err == nil && constantTimeEqual(sess.credFP, credentialFingerprint(u)) {
 					ctx := context.WithValue(r.Context(), ctxUser, u)
@@ -223,7 +298,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *store.U
 	if c, err := r.Cookie(s.cookieName()); err == nil {
 		s.sessions.delete(c.Value)
 	}
-	id := s.sessions.create(u.Name, credentialFingerprint(u), notice)
+	id := s.sessions.create(u.Name, credentialFingerprint(u), notice, s.clientIP(r), r.UserAgent())
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.cookieName(),
 		Value:    id,

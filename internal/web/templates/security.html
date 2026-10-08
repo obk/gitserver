@@ -1,0 +1,27 @@
+{{define "content"}}{{with .Data}}<div>
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="success">{{.Notice}}</div>{{end}}
+<h3>Where you're logged in</h3>
+<table class="list">
+<thead><tr><th>Browser</th><th>IP address</th><th>Last active</th><th></th></tr></thead>
+<tbody>
+{{range .Sessions}}<tr><td>{{.Agent}}{{if .Current}} <span class="badge">this browser</span>{{end}}<br><small class="muted">logged in <span title="{{datefull .Created}}">{{ago .Created}}</span></small></td>
+<td><code>{{.IP}}</code></td><td><span title="{{datefull .Seen}}">{{ago .Seen}}</span></td>
+<td class="actions"><form method="post" action="/settings/security/logout" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="ref" value="{{.Ref}}"><button type="submit" class="btn btn-danger btn-sm">Log out</button></form></td></tr>
+{{end}}</tbody>
+</table>
+{{if gt (len .Sessions) 1}}<form method="post" action="/settings/security/logout-others" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button type="submit" class="btn btn-danger">Log out all other sessions</button>
+</form>{{end}}
+<p class="muted">Sessions end after 2 hours without activity, after 12 hours at most, when your password or authenticator changes, and when the server restarts.</p>
+<h3>Recent logins</h3>
+{{if .Logins}}<table class="list">
+<thead><tr><th>When</th><th>IP address</th><th>Browser</th><th>How</th></tr></thead>
+<tbody>
+{{range .Logins}}<tr><td><span title="{{datefull .At}}">{{date .At}}</span></td><td><code>{{.IP}}</code></td><td>{{.Browser}}</td><td>{{.Method}}</td></tr>
+{{end}}</tbody>
+</table>
+<p class="muted">The last 20 logins. Don't recognize one? Change your password and set up a new authenticator under two-factor, then log out the other sessions above.</p>
+{{else}}<p class="muted">No logins recorded yet.</p>{{end}}
+</div>{{end}}{{end}}

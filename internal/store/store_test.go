@@ -390,3 +390,47 @@ func TestRecoveryCodesStore(t *testing.T) {
 		t.Fatalf("user_version %d", version)
 	}
 }
+
+func TestLogins(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "alice"})
+	s.Create(&User{Name: "bob"})
+	start := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for i := range 25 {
+		if err := s.RecordLogin("alice", Login{At: start.Add(time.Duration(i) * time.Minute), IP: fmt.Sprintf("192.0.2.%d", i), Agent: "UA", Method: "m"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.RecordLogin("bob", Login{At: start, IP: "198.51.100.1", Agent: strings.Repeat("x", 500), Method: "m"})
+	list, err := s.RecentLogins("alice", 100)
+	if err != nil || len(list) != maxLogins {
+		t.Fatalf("%d logins kept, want %d: %v", len(list), maxLogins, err)
+	}
+	if list[0].IP != "192.0.2.24" || list[maxLogins-1].IP != "192.0.2.5" || !list[0].At.Equal(start.Add(24*time.Minute)) {
+		t.Fatalf("not the newest first: %+v ... %+v", list[0], list[maxLogins-1])
+	}
+	if b, _ := s.RecentLogins("bob", 1); len(b) != 1 || len(b[0].Agent) != 200 {
+		t.Fatal("bob's login missing or agent not shortened")
+	}
+	s.Delete("bob")
+	var rows int
+	s.db.QueryRow(`SELECT count(*) FROM logins WHERE user = 'bob'`).Scan(&rows)
+	if rows != 0 {
+		t.Fatal("logins left after deleting the user")
+	}
+	// Databases from before the logins table get it on open.
+	s.db.Exec(`DROP TABLE logins`)
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RecordLogin("alice", Login{At: start, IP: "x", Agent: "y", Method: "z"}); err != nil {
+		t.Fatalf("table not added on open: %v", err)
+	}
+}

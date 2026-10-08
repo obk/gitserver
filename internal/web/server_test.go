@@ -546,6 +546,9 @@ func TestInviteSignup(t *testing.T) {
 	if !strings.Contains(body, "Your recovery codes") || len(recoveryCodeRe.FindAllString(body, -1)) != 10 {
 		t.Fatalf("new account got no recovery codes:\n%s", body)
 	}
+	if l, _ := e.s.store.RecentLogins("carol", 5); len(l) != 1 || l[0].Method != "signup" {
+		t.Fatalf("signup not recorded as a login: %+v", l)
+	}
 	u, err := e.s.store.Get("carol")
 	if err != nil || u.Admin || u.InvitedBy != "alice" || len(u.SSHKeys) != 1 || u.SSHKeys[0].Comment != "carol@laptop" {
 		t.Fatalf("bad user record: %+v, %v", u, err)
@@ -1041,5 +1044,98 @@ func TestForcePushCleanup(t *testing.T) {
 	run("push", "-q", "git@git.test:~alice/pub", ":wip")
 	if onDisk(wip) {
 		t.Error("commit of a deleted branch still on disk")
+	}
+}
+
+// Users see where they are logged in, can end those sessions, and see
+// their recent logins, including the previous one right after logging in.
+func TestSecurityPage(t *testing.T) {
+	e := newTestEnv(t)
+	login := func(user, ip, agent, code string) (*http.Client, string) {
+		e.s.store.Update(user, func(u *store.User) error { u.TOTPLast = 0; return nil })
+		if code == "" {
+			code = e.code(user)
+		}
+		jar, _ := cookiejar.New(nil)
+		c := &http.Client{Jar: jar}
+		req, _ := http.NewRequest("POST", e.srv.URL+"/login", strings.NewReader(url.Values{"username": {user},
+			"password": {user + "-password-123"}, "code": {code}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("User-Agent", agent)
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 || !strings.Contains(string(b), "Log out") {
+			t.Fatalf("login %s failed (%d)", user, resp.StatusCode)
+		}
+		return c, string(b)
+	}
+	const firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"
+	const chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+
+	a, body := login("alice", "198.51.100.1", firefox, "")
+	if strings.Contains(body, "Last login") {
+		t.Fatal("previous login shown on the very first login")
+	}
+	b, body := login("alice", "203.0.113.7", chrome, "")
+	if !strings.Contains(body, "Last login:") || !strings.Contains(body, "198.51.100.1") || !strings.Contains(body, "Firefox on Linux") {
+		t.Fatalf("previous login not shown:\n%s", body)
+	}
+	if _, body := e.get(b, "/"); strings.Contains(body, "Last login") {
+		t.Fatal("previous login shown twice")
+	}
+	bob, _ := login("bob", "192.0.2.9", chrome, "")
+
+	_, body = e.get(b, "/settings/security")
+	if strings.Count(body, "this browser") != 1 || !strings.Contains(body, "Firefox on Linux") || !strings.Contains(body, "Chrome on Windows") ||
+		!strings.Contains(body, "203.0.113.7") || strings.Count(body, "password and authenticator code") != 2 {
+		t.Fatalf("security page wrong:\n%s", body)
+	}
+	if strings.Contains(body, "192.0.2.9") {
+		t.Fatal("bob's session listed for alice")
+	}
+	// End the Firefox session from the Chrome one.
+	row := regexp.MustCompile(`(?s)<tr><td>Firefox on Linux<br>.*?name="ref" value="([^"]+)"`).FindStringSubmatch(body)
+	if row == nil {
+		t.Fatalf("no Firefox row:\n%s", body)
+	}
+	csrf := csrfToken(t, body)
+	if status, body := e.post(b, "/settings/security/logout", url.Values{"csrf": {csrf}, "ref": {row[1]}}, ""); status != 200 || !strings.Contains(body, "That session was logged out") {
+		t.Fatalf("logout of one session: %d", status)
+	}
+	if _, body := e.get(a, "/settings/keys"); strings.Contains(body, "Log out") {
+		t.Fatal("the Firefox session is still logged in")
+	}
+	// Another user's session can't be ended, even with its reference.
+	_, bobBody := e.get(bob, "/settings/security")
+	bobRef := regexp.MustCompile(`name="ref" value="([^"]+)"`).FindStringSubmatch(bobBody)
+	if status, _ := e.post(b, "/settings/security/logout", url.Values{"csrf": {csrf}, "ref": {bobRef[1]}}, ""); status != http.StatusBadRequest {
+		t.Fatalf("alice ended bob's session: %d", status)
+	}
+	if _, body := e.get(bob, "/settings/keys"); !strings.Contains(body, "Log out") {
+		t.Fatal("bob was logged out")
+	}
+	// Log out all others.
+	c, _ := login("alice", "192.0.2.50", firefox, "")
+	if status, body := e.post(b, "/settings/security/logout-others", url.Values{"csrf": {csrf}}, ""); status != 200 || !strings.Contains(body, "All other sessions") {
+		t.Fatalf("logout others: %d", status)
+	}
+	if _, body := e.get(c, "/settings/keys"); strings.Contains(body, "Log out") {
+		t.Fatal("other session survived")
+	}
+	if _, body := e.get(b, "/settings/keys"); !strings.Contains(body, "Log out") {
+		t.Fatal("this session was logged out too")
+	}
+
+	// A recovery-code login is recorded as such.
+	codes := account.NewRecoveryCodes()
+	e.s.store.SetRecoveryCodes("alice", []string{account.HashRecoveryCode("alice", codes[0])})
+	login("alice", "192.0.2.60", firefox, codes[0])
+	if l, _ := e.s.store.RecentLogins("alice", 1); len(l) != 1 || l[0].Method != "password and recovery code" || l[0].IP != "192.0.2.60" {
+		t.Fatalf("recovery login recorded as %+v", l)
 	}
 }
