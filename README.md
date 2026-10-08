@@ -378,35 +378,41 @@ Every claim below links to the code that implements it. On this server and on Gi
   - a stolen database or backup holds only ciphertext Code: [`Backup`](store.go#L162).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`loadSecretBox`](secrets.go#L79).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`encryptTOTPSecrets`](secrets.go#L189), [`purgeFreedPages`](store.go#L152).
-- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](auth.go#L321), [`newLimiter`](server.go#L76), [`ipKey`](server.go#L320), [`passwordOK`](web.go#L244).
+- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](auth.go#L321), [`newLimiter`](server.go#L78), [`ipKey`](server.go#L358), [`passwordOK`](web.go#L244).
 - **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. Code: [`codeAlerts`](auth.go#L376), [`alerts.take`](web.go#L267).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](auth.go#L226).
-  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](server.go#L427).
+  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](server.go#L465).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](auth.go#L192).
-  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](auth.go#L222), [`withSession`](server.go#L352).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](server.go#L442), [`NewCrossOriginProtection`](server.go#L168), [`safeNext`](web.go#L196).
+  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](auth.go#L222), [`withSession`](server.go#L390).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](server.go#L480), [`NewCrossOriginProtection`](server.go#L171), [`safeNext`](web.go#L196).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](store.go#L177), [`errNameUsed`](store.go#L61).
 - **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](store.go#L555), [`RedeemInvite`](store.go#L628).
 
 ### Git
 
 - **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6), [`cmdSSHKeys`](ssh.go#L92), [`authorizedKeyLine`](ssh.go#L125).
-  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](ssh.go#L154), [`sshRepoArgRe`](ssh.go#L151), [`cmdSSHServe`](ssh.go#L168), [`syscall.Exec`](ssh.go#L225).
+  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](ssh.go#L195), [`sshRepoArgRe`](ssh.go#L192), [`cmdSSHServe`](ssh.go#L209), [`syscall.Exec`](ssh.go#L281).
   - The sshd config applies only to the `git` user. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6).
-  - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](server_test.go#L279).
-- **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit and end after 30 minutes, so stalled clients can't hold the slots, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](server.go#L192), [`cloneTimeout`](server.go#L190), [`gitHTTPRe`](server.go#L183), [`cloneSlots`](server.go#L186), [`Authorization`](server.go#L236).
-- **Removed commits stay removed:** after a force push or a deleted branch, the old commits stay in the repository until `git gc` prunes them. The web UI only shows commits that a branch or tag reaches, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. To delete a leaked secret from the disk too, run `git gc --prune=now` in the repository. Code: [`reachable`](git.go#L145), [`Git-Protocol`](server.go#L238), [`version=1`](ssh.go#L217).
-- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](web.go#L516), [`Repository not found`](server.go#L215), [`not found or access denied`](ssh.go#L205).
+  - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](server_test.go#L280).
+- **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit and end after 30 minutes, so stalled clients can't hold the slots, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](server.go#L224), [`cloneTimeout`](server.go#L222), [`gitHTTPRe`](server.go#L186), [`cloneSlots`](server.go#L189), [`Authorization`](server.go#L274).
+- **Removed commits stay removed:** after a force push or a deleted branch, the old commits stay in the repository until `git gc` prunes them. The web UI only shows commits that a branch or tag reaches, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. To delete a leaked secret from the disk too, run `git gc --prune=now` in the repository. Code: [`reachable`](git.go#L145), [`Git-Protocol`](server.go#L276), [`version=1`](ssh.go#L270).
+- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](web.go#L524), [`Repository not found`](server.go#L247), [`not found or access denied`](ssh.go#L246).
 - **Hardening:**
-  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](repo.go#L34), [`validRev`](git.go#L103), [`cleanTreePath`](web.go#L493), [`gitCmd`](git.go#L55).
+  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](repo.go#L34), [`validRev`](git.go#L103), [`cleanTreePath`](web.go#L501), [`gitCmd`](git.go#L55).
   - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](git.go#L305).
   - web git processes are capped and time out after 30 s Code: [`gitSlots`](git.go#L40), [`gitTimeout`](git.go#L21).
+- **Limits per account and client,** so one user or address can't fill the disk or take all the capacity:
+  - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](ssh.go#L146), [`minFreeDisk`](ssh.go#L147).
+  - each user runs at most 4 git operations over SSH at once. The count is kept in lock files that git holds until it exits, so crashed processes free their slot Code: [`maxGitPerUser`](ssh.go#L148), [`acquireUserSlot`](ssh.go#L158).
+  - each client address (IPv6: each /64) runs at most 2 HTTPS clones at once Code: [`clonesPerIP`](server.go#L193).
+  - each user can create at most 100 repositories in the web UI; the command line isn't limited Code: [`maxReposPerUser`](web.go#L406).
+  - to change a limit, edit the constant and rebuild.
 
 ### Web
 
-- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](server.go#L255), [`qrSVG`](signup.go#L264), [`tokenClass`](highlight.go#L93).
-- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](server.go#L255), [`no-store`](web.go#L89).
-- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](web.go#L764), [`sandbox`](web.go#L794), [`Content-Disposition`](web.go#L799), [`rawContentType`](markdown.go#L83).
+- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](server.go#L293), [`qrSVG`](signup.go#L264), [`tokenClass`](highlight.go#L93).
+- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](server.go#L293), [`no-store`](web.go#L89).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](web.go#L772), [`sandbox`](web.go#L802), [`Content-Disposition`](web.go#L807), [`rawContentType`](markdown.go#L83).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`renderMarkdown`](markdown.go#L25), [`rewriteRelative`](markdown.go#L57).
 - **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Code: [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L14), [`generic-browser`](deploy/anubis.botPolicies.yaml#L22).
 
@@ -555,6 +561,10 @@ make bundle       # deploy bundle for ARCH (default amd64)
 ./gitserver demo
 ```
 
+The input checks that face attackers (SSH command, revisions, tree paths, login redirects, README links) have fuzz tests in `fuzz_test.go`. `make test` runs their seed inputs; to search for new failures, run one for a while, e.g. `go test -run '^$' -fuzz '^FuzzSafeNext$' -fuzztime 5m .`. A failing input is saved under `testdata/fuzz/` and then runs with every `make test`.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs gofmt, `make test` and [govulncheck](https://go.dev/doc/security/vuln/) on every push and pull request. Once a week it also fuzzes every target for 5 minutes and checks for newly published vulnerabilities.
+
 Project layout:
 
 | File | What |
@@ -563,7 +573,7 @@ Project layout:
 | `server.go` | HTTP setup, middleware, HTTPS clone |
 | `web.go` | web pages |
 | `signup.go` | invite signup, invites page, password change |
-| `ssh.go` | SSH keys, `ssh-keys` / `ssh-serve` |
+| `ssh.go` | SSH keys, `ssh-keys` / `ssh-serve`, SSH limits |
 | `auth.go` | password hashing, TOTP, sessions, rate limits |
 | `secrets.go` | 2FA secret encryption |
 | `store.go` | SQLite database |

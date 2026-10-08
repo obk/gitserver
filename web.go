@@ -402,12 +402,20 @@ func (s *Server) handleCreateForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "create", s.newPage(r, "New repository", createData{}))
 }
 
+// maxReposPerUser caps repositories created in the web UI (the CLI is not limited).
+const maxReposPerUser = 100
+
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	data := createData{
 		Name:        strings.TrimSpace(r.PostFormValue("name")),
 		Description: strings.TrimSpace(r.PostFormValue("description")),
 		Public:      r.PostFormValue("visibility") == "public",
+	}
+	if repos, err := listRepos(s.reposDir, u.Name); err != nil || len(repos) >= maxReposPerUser {
+		data.Error = fmt.Sprintf("You have reached the limit of %d repositories. Delete one first, or ask the administrator.", maxReposPerUser)
+		s.render(w, http.StatusBadRequest, "create", s.newPage(r, "New repository", data))
+		return
 	}
 	if err := createRepo(s.reposDir, u.Name, data.Name, data.Description, data.Public); err != nil {
 		data.Error = capitalize(err.Error()) + "."

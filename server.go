@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,6 +44,7 @@ type Server struct {
 	store    *Store
 	sessions *sessionStore
 	limiter  *limiter
+	clones   *counter // HTTPS clones running per client (ipKey)
 	alerts   *codeAlerts
 	pending  *pendingSignups
 	box      *secretBox // encrypts TOTP secrets
@@ -74,6 +76,7 @@ func NewServer(cfg Config) (*Server, error) {
 		store:    store,
 		sessions: newSessionStore(),
 		limiter:  newLimiter(10, 15*time.Minute),
+		clones:   &counter{m: make(map[string]int)},
 		alerts:   newCodeAlerts(),
 		pending:  newPendingSignups(),
 		reposDir: filepath.Join(cfg.DataDir, "repos"),
@@ -185,6 +188,35 @@ var gitHTTPRe = regexp.MustCompile(`^/~([a-z0-9][a-z0-9_-]{0,31})/([A-Za-z0-9][A
 // cloneSlots limits concurrent HTTPS clones/fetches (separate from the web UI).
 var cloneSlots = make(chan struct{}, max(2, runtime.NumCPU()))
 
+// clonesPerIP caps concurrent HTTPS clones from one client (IPv6: one /64),
+// so a single client cannot take all of cloneSlots.
+const clonesPerIP = 2
+
+// counter tracks how many operations are running per key.
+type counter struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+// acquire counts one more operation for key unless max are running.
+func (c *counter) acquire(key string, max int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m[key] >= max {
+		return false
+	}
+	c.m[key]++
+	return true
+}
+
+func (c *counter) release(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m[key]--; c.m[key] <= 0 {
+		delete(c.m, key)
+	}
+}
+
 // cloneTimeout ends an HTTPS clone or fetch that takes longer, so clients
 // that stop reading cannot hold the clone slots forever.
 const cloneTimeout = 30 * time.Minute
@@ -215,6 +247,12 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 		plain(http.StatusNotFound, "Repository not found. Private repositories can only be cloned over SSH:\n  git clone "+sshURL)
 		return
 	}
+	client := ipKey(s.clientIP(r))
+	if !s.clones.acquire(client, clonesPerIP) {
+		plain(http.StatusServiceUnavailable, fmt.Sprintf("Too many clones from your address at once (at most %d); try again when one has finished.", clonesPerIP))
+		return
+	}
+	defer s.clones.release(client)
 	// When the deadline passes, writes fail and the CGI handler kills git.
 	// The deadlines are cleared afterwards: the connection may be reused.
 	rc := http.NewResponseController(w)

@@ -141,6 +141,48 @@ func authorizedKeyLine(dataDir, user string, pub ssh.PublicKey) (string, error) 
 	return fmt.Sprintf(`restrict,command="%s" %s`, cmd, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))), nil
 }
 
+// Limits for git over SSH, so one account cannot fill the disk or the CPU.
+const (
+	maxPushSize   = 1 << 30 // receive.maxInputSize: the largest pack one push may send
+	minFreeDisk   = 1 << 30 // pushes are refused when less disk space is left
+	maxGitPerUser = 4       // git operations one user may run at the same time
+)
+
+var errBusyUser = fmt.Errorf("too many git operations of yours are running (at most %d at once); try again when one has finished", maxGitPerUser)
+
+// acquireUserSlot takes one of the user's maxGitPerUser lock files and
+// returns its descriptor, or ok false if all are taken. ssh-serve processes
+// are separate, so the count lives in flock(2) locks. The descriptor has no
+// close-on-exec flag (syscall.Open, unlike os.OpenFile, does not set it), so
+// git inherits it: the lock is held until git and its children exit, even
+// if they crash.
+func acquireUserSlot(dataDir, user string) (fd int, ok bool, err error) {
+	dir := filepath.Join(dataDir, "locks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return -1, false, err
+	}
+	for i := range maxGitPerUser {
+		fd, err := syscall.Open(filepath.Join(dir, fmt.Sprintf("ssh-%s.%d", user, i)), syscall.O_RDWR|syscall.O_CREAT, 0o600)
+		if err != nil {
+			return -1, false, err
+		}
+		if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return fd, true, nil
+		}
+		syscall.Close(fd)
+	}
+	return -1, false, nil
+}
+
+// freeDisk returns the bytes available to unprivileged users on dir's filesystem.
+func freeDisk(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
 var gitServices = map[string]string{
 	"git-upload-pack":    "upload-pack",
 	"git-upload-archive": "upload-archive",
@@ -204,6 +246,18 @@ func cmdSSHServe(args []string) error {
 		audit("denied user=%s service=%s repo=~%s/%s", u.Name, service, owner, repoName)
 		return fmt.Errorf("repository ~%s/%s not found or access denied", owner, repoName)
 	}
+	if _, ok, err := acquireUserSlot(*data, u.Name); err != nil {
+		return err
+	} else if !ok {
+		audit("busy user=%s service=%s repo=%s", u.Name, service, repo.FullName())
+		return errBusyUser
+	}
+	if write {
+		if free, err := freeDisk(repo.Dir); err == nil && free < minFreeDisk {
+			audit("disk full user=%s repo=%s free=%d", u.Name, repo.FullName(), free)
+			return errors.New("the server is almost out of disk space, so pushing is disabled for now; please tell the administrator")
+		}
+	}
 	audit("user=%s service=%s repo=%s", u.Name, service, repo.FullName())
 
 	gitPath, err := exec.LookPath("git")
@@ -218,8 +272,11 @@ func cmdSSHServe(args []string) error {
 		env = append(env, "GIT_PROTOCOL="+p)
 	}
 	argv := []string{"git", service}
-	if service == "upload-pack" {
+	switch service {
+	case "upload-pack":
 		argv = append(argv, "--strict")
+	case "receive-pack":
+		argv = []string{"git", "-c", fmt.Sprintf("receive.maxInputSize=%d", maxPushSize), service}
 	}
 	argv = append(argv, repo.Dir)
 	return syscall.Exec(gitPath, argv, env)

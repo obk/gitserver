@@ -1,0 +1,52 @@
+# Checks every push and pull request; a weekly run also fuzzes longer and
+# catches newly published vulnerabilities in the Go toolchain or modules.
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Newest patch release, so security fixes in Go itself are picked up.
+          go-version: "1.26.x"
+          check-latest: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet and test
+        run: make test
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzParseSSHCommand, FuzzValidRev, FuzzCleanTreePath, FuzzSafeNext, FuzzRewriteRelative]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: fuzz ${{ matrix.target }}
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 5m .
+      - name: keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: testdata/fuzz

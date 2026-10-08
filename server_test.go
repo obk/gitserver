@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -944,4 +945,126 @@ func TestLoopbackAddr(t *testing.T) {
 			t.Errorf("loopbackAddr(%q) = %v", addr, !want)
 		}
 	}
+}
+
+// Each user may run at most maxGitPerUser git operations over SSH at once;
+// the locks are per user and freed when the holder goes away.
+func TestUserSlots(t *testing.T) {
+	data := t.TempDir()
+	var fds []int
+	for i := range maxGitPerUser {
+		fd, ok, err := acquireUserSlot(data, "alice")
+		if !ok || err != nil {
+			t.Fatalf("slot %d: %v %v", i, ok, err)
+		}
+		fds = append(fds, fd)
+	}
+	if _, ok, _ := acquireUserSlot(data, "alice"); ok {
+		t.Fatal("more than maxGitPerUser slots")
+	}
+	if _, ok, _ := acquireUserSlot(data, "bob"); !ok {
+		t.Fatal("alice's slots blocked bob")
+	}
+	syscall.Close(fds[1]) // git exited
+	if _, ok, _ := acquireUserSlot(data, "alice"); !ok {
+		t.Fatal("slot not freed when its holder closed it")
+	}
+}
+
+func TestSSHBusyUser(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+
+	// git inherits the lock: while a running upload-pack waits for the
+	// client, only maxGitPerUser-1 slots are left.
+	cmd := exec.Command(testBinary, "ssh-serve", "-data", e.data, "alice")
+	cmd.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND=git-upload-pack '~alice/pub'")
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(stdout, buf); err != nil { // git is running: ref advertisement started
+		t.Fatal(err)
+	}
+	free := 0
+	var fds []int
+	for {
+		fd, ok, _ := acquireUserSlot(e.data, "alice")
+		if !ok {
+			break
+		}
+		free++
+		fds = append(fds, fd)
+	}
+	for _, fd := range fds {
+		syscall.Close(fd)
+	}
+	stdin.Close()
+	io.Copy(io.Discard, stdout)
+	cmd.Wait()
+	if free != maxGitPerUser-1 {
+		t.Fatalf("%d slots free while git runs, want %d", free, maxGitPerUser-1)
+	}
+	for range maxGitPerUser {
+		if _, ok, _ := acquireUserSlot(e.data, "alice"); !ok {
+			t.Fatal("could not take slot")
+		}
+	}
+	out, err := e.git("alice", e.work, "clone", "-q", "git@git.test:~alice/pub", "busy")
+	if err == nil || !strings.Contains(out, "too many git operations") {
+		t.Fatalf("clone with all slots taken: %v\n%s", err, out)
+	}
+	if out, err := e.git("bob", e.work, "clone", "-q", "git@git.test:~alice/pub", "bob-ok"); err != nil {
+		t.Fatalf("bob blocked by alice's slots: %v\n%s", err, out)
+	}
+}
+
+func TestClonesPerIP(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+	key := ipKey("198.51.100.9")
+	for range clonesPerIP {
+		e.s.clones.acquire(key, clonesPerIP)
+	}
+	clone := func(ip, dir string) (string, error) {
+		return e.git("", e.work, "-c", "http.extraHeader=X-Real-IP: "+ip, "clone", "-q", e.srv.URL+"/~alice/pub", dir)
+	}
+	if out, err := clone("198.51.100.9", "c1"); err == nil || !strings.Contains(out, "Too many clones from your address") {
+		t.Fatalf("clone over the per-IP limit: %v\n%s", err, out)
+	}
+	if out, err := clone("198.51.100.10", "c2"); err != nil {
+		t.Fatalf("other client blocked: %v\n%s", err, out)
+	}
+	e.s.clones.release(key)
+	if out, err := clone("198.51.100.9", "c3"); err != nil {
+		t.Fatalf("clone after a slot was freed: %v\n%s", err, out)
+	}
+	if n := e.s.clones.m[key]; n != clonesPerIP-1 {
+		t.Fatalf("finished clones not released: %d running", n)
+	}
+}
+
+func TestRepoLimit(t *testing.T) {
+	e := newTestEnv(t)
+	for i := len(mustList(t, e, "bob")); i < maxReposPerUser; i++ {
+		dir := repoDir(filepath.Join(e.data, "repos"), "bob", fmt.Sprintf("r%d", i))
+		os.MkdirAll(dir, 0o750)
+		os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+	}
+	bob := e.login("bob")
+	_, body := e.get(bob, "/create")
+	status, body := e.post(bob, "/create", url.Values{"csrf": {csrfToken(t, body)}, "name": {"one-more"}}, "")
+	if status != http.StatusBadRequest || !strings.Contains(body, "limit of") {
+		t.Fatalf("repo over the limit: %d", status)
+	}
+}
+
+func mustList(t *testing.T, e *testEnv, owner string) []*Repo {
+	repos, err := listRepos(filepath.Join(e.data, "repos"), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repos
 }
