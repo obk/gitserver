@@ -95,7 +95,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		s.passwordPage(w, r, http.StatusTooManyRequests, passwordData{Error: "Too many failed attempts. Try again later."})
 		return
 	}
-	u, _, err := s.authenticate(name, r.PostFormValue("current"), r.PostFormValue("totp"))
+	u, _, _, err := s.authenticate(name, r.PostFormValue("current"), r.PostFormValue("totp"))
 	if errors.Is(err, account.ErrHashBusy) {
 		s.passwordPage(w, r, http.StatusServiceUnavailable, passwordData{Error: capitalize(err.Error()) + "."})
 		return

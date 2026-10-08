@@ -278,9 +278,18 @@ Admins see **Settings → invites**. Create a link valid for 1, 7 or 30 days, op
 
 1. opens the link, then picks a username, a password (12+ characters) and pastes their SSH public key
 2. scans the 2FA QR code and enters one code
-3. is logged in. The account only exists once that code checks out.
+3. is logged in and shown 10 **recovery codes**, once, to save somewhere safe. The account only exists once that code checks out.
 
 Unused invites can be revoked. Usernames are lowercase letters, digits, `-` and `_`, up to 32 characters. About 860 reserved names (`admin`, `root`, `support`, `api`, …) are blocked, so nobody can pose as staff.
+
+### Two-factor and recovery codes
+
+**Settings → two-factor** shows how many recovery codes you have left:
+
+- **Recovery codes:** if you lose your phone, log in with your password and one of your recovery codes, typed into the code field instead of the 6-digit code. Each code works once. New accounts get 10 at signup; you can make a new set at any time (the old ones stop working). They're shown only once, right after they're made.
+- **New authenticator:** after logging in with a recovery code, or when moving to a new phone, set up a new authenticator here: scan the QR code and confirm with one code. The old app stops working and all your other sessions are logged out.
+
+Both need your current password. Accounts created with `gitserverctl user add` start without recovery codes; make them on this page.
 
 ### Password
 
@@ -399,22 +408,23 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Accounts
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
-- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L114).
+- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L126).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L521), [`takeNewCodes`](internal/web/session.go#L65), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
   - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L413), [`run`](deploy/gitserverctl#L16).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
-  - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L166).
+  - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L167).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
-  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L156).
+  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L239), [`AddCodeFailure`](internal/store/store.go#L459), [`TakeCodeFailures`](internal/store/store.go#L467).
-- **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L51).
-  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L195).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L475), [`TakeCodeFailures`](internal/store/store.go#L483).
+- **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L77).
+  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L222).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L17).
-  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L47), [`withSession`](internal/web/session.go#L120).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L210), [`NewCrossOriginProtection`](internal/web/server.go#L168), [`safeNext`](internal/web/login.go#L17).
-- **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L181), [`ErrNameUsed`](internal/store/store.go#L65).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L625), [`RedeemInvite`](internal/store/store.go#L698).
+  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L50), [`withSession`](internal/web/session.go#L146).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L239), [`NewCrossOriginProtection`](internal/web/server.go#L174), [`safeNext`](internal/web/login.go#L17).
+- **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L675), [`RedeemInvite`](internal/store/store.go#L748).
 
 ### Git
 
@@ -438,7 +448,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 ### Web
 
-- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L259), [`tokenClass`](internal/render/highlight.go#L93).
+- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L265), [`tokenClass`](internal/render/highlight.go#L93).
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L81).
 - **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L392), [`sandbox`](internal/web/repos.go#L422), [`Content-Disposition`](internal/web/repos.go#L427), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
@@ -449,7 +459,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
 - **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L520).
 - **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L403), [`0o600`](internal/store/store.go#L117), [`secure_delete`](internal/store/store.go#L124).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L403), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
 
 ---
 
@@ -502,6 +512,7 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Login attempts | 10 failures per 15 min (per IP; per account for wrong 2FA codes) |
 | Invite validity | 1, 7 or 30 days (web); any duration (CLI) |
 | Signup | 15 minutes between step 1 and the 2FA confirmation |
+| Recovery codes | 10 per account, each usable once |
 | File view | files up to 1 MiB are shown; larger ones via "View raw" |
 | Syntax highlighting | files up to 512 KiB / 2 s; diffs up to 1 MiB |
 | Diff view | up to 2 MiB, then truncated |
@@ -561,7 +572,7 @@ Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`,
 **2FA code not accepted.**
 - Check the phone's clock; codes allow only ±30 s.
 - Each code works once, so wait for the next one.
-- Lost phone: `sudo gitserverctl user totp NAME`.
+- Lost phone: log in with a recovery code, then set up a new authenticator under Settings → two-factor. No codes left: `sudo gitserverctl user totp NAME`.
 
 **"Too many failed attempts".** Wait 15 minutes. The limit is per IP for wrong passwords.
 
@@ -609,7 +620,7 @@ make bundle       # deploy bundle for ARCH (default amd64)
 | `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `ssh-keys`, `ssh-serve`) and `demo` |
 | `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
 | `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
-| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings) and loading the 2FA encryption key |
+| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes) and loading the 2FA encryption key |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
 | `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `invites.go`, `repos.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
@@ -653,7 +664,7 @@ podman exec -e DOMAIN=localhost gs sh /tmp/b/deploy/install.sh
 - **No HTTPS cloning of private repositories:** that would need HTTPS credentials. Private repos are SSH-only.
 - **Restarts log everyone out:** sessions are kept in memory. (Warnings about wrong 2FA codes are kept in the database and survive restarts.)
 - **Not in the web UI:** issues, pull requests, CI and webhooks. This is a git host, not a forge.
-- **Manual recovery:** a lost password or phone needs the server admin (`gitserverctl user passwd/totp`).
+- **Manual recovery:** a lost password needs the server admin (`gitserverctl user passwd`), and so does a lost phone once all recovery codes are used up (`gitserverctl user totp`).
 
 ## Credits
 

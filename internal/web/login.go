@@ -62,7 +62,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusTooManyRequests, "Too many failed attempts. Try again later.")
 		return
 	}
-	u, passwordOK, err := s.authenticate(name, password, code)
+	u, passwordOK, viaRecovery, err := s.authenticate(name, password, code)
 	if errors.Is(err, account.ErrHashBusy) {
 		s.limiter.refund(ipKey)
 		fail(http.StatusServiceUnavailable, capitalize(err.Error())+".")
@@ -89,19 +89,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Wrong codes entered with the correct password mean someone may know
 	// it: warn the user instead of locking the account (which would let that
 	// person lock the real user out).
-	var notice string
+	var notices []string
+	if viaRecovery {
+		left, _ := s.store.RecoveryCodesLeft(u.Name)
+		notices = append(notices, fmt.Sprintf("You logged in with a recovery code; it won't work again (%d left). "+
+			"If you lost your authenticator, set up a new one below.", left))
+		next = "/settings/2fa"
+		log.Printf("login with a recovery code user=%q ip=%s left=%d", name, ip, left)
+	}
 	failures, since, err := s.store.TakeCodeFailures(u.Name)
 	if err != nil {
 		log.Printf("login: reading wrong codes of user=%q: %v", u.Name, err)
 	}
 	if failures > 0 {
-		notice = fmt.Sprintf("Since %s, %d wrong 2FA code(s) were entered together with your correct password. "+
-			"If that was not you, someone knows your password: change it now.", since.UTC().Format("2006-01-02 15:04 MST"), failures)
+		notices = append(notices, fmt.Sprintf("Since %s, %d wrong 2FA code(s) were entered together with your correct password. "+
+			"If that was not you, someone knows your password: change it now.", since.UTC().Format("2006-01-02 15:04 MST"), failures))
 		next = "/settings/password"
 		log.Printf("login ok user=%q ip=%s after %d wrong code(s) with the correct password", name, ip, failures)
 	} else {
 		log.Printf("login ok user=%q ip=%s", name, ip)
 	}
+	notice := strings.Join(notices, " ")
 	s.startSession(w, r, u, notice)
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
@@ -111,17 +119,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // code is only consumed once the password has been verified. The error is
 // account.ErrHashBusy when the server is too busy to check the password, or
 // errCodeReused when the code was right but already used.
-func (s *Server) authenticate(name, password, code string) (u *store.User, passwordOK bool, err error) {
+//
+// Instead of a code from the authenticator, code may be one of the user's
+// recovery codes (a lost phone). It then works only this once, and
+// viaRecovery is set.
+func (s *Server) authenticate(name, password, code string) (u *store.User, passwordOK, viaRecovery bool, err error) {
 	if len(password) > 1024 {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	u, err = s.store.Get(name)
 	if err != nil {
 		_, err := account.CheckPassword(account.DummyHash(), password)
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if ok, err := account.CheckPassword(u.PasswordHash, password); !ok {
-		return nil, false, err
+		return nil, false, false, err
+	}
+	if account.NormalizeRecoveryCode(code) != "" {
+		used, err := s.store.UseRecoveryCode(name, account.HashRecoveryCode(name, code))
+		if err != nil {
+			log.Printf("login: user=%q: recovery code: %v", name, err)
+		}
+		if !used {
+			return nil, true, false, nil
+		}
+		return u, true, true, nil
 	}
 	err = s.store.Update(name, func(stored *store.User) error {
 		secret, err := s.box.OpenTOTP(stored.Name, stored.TOTPSecret)
@@ -142,12 +164,12 @@ func (s *Server) authenticate(name, password, code string) (u *store.User, passw
 		return nil
 	})
 	if errors.Is(err, errCodeReused) {
-		return nil, true, err
+		return nil, true, false, err
 	}
 	if err != nil {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
-	return u, true, nil
+	return u, true, false, nil
 }
 
 // errCodeReused: the code is valid but was already used, e.g. a form sent

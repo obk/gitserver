@@ -39,17 +39,18 @@ type Config struct {
 }
 
 type Server struct {
-	cfg      Config
-	store    *store.Store
-	sessions *sessionStore
-	limiter  *limiter
-	clones   *counter // HTTPS clones running per client (ipKey)
-	pending  *pendingSignups
-	box      *account.SecretBox // encrypts TOTP secrets
-	reposDir string
-	gitPath  string
-	tmpl     map[string]*template.Template
-	assetVer string // changes whenever the stylesheets change (cache busting)
+	cfg        Config
+	store      *store.Store
+	sessions   *sessionStore
+	limiter    *limiter
+	clones     *counter // HTTPS clones running per client (ipKey)
+	pending    *pendingSignups
+	totpSetups *totpSetups        // authenticators being set up (Settings -> two-factor)
+	box        *account.SecretBox // encrypts TOTP secrets
+	reposDir   string
+	gitPath    string
+	tmpl       map[string]*template.Template
+	assetVer   string // changes whenever the stylesheets change (cache busting)
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -69,16 +70,17 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		cfg:      cfg,
-		box:      box,
-		store:    st,
-		sessions: newSessionStore(),
-		limiter:  newLimiter(10, 15*time.Minute),
-		clones:   &counter{m: make(map[string]int)},
-		pending:  newPendingSignups(),
-		reposDir: filepath.Join(cfg.DataDir, "repos"),
-		gitPath:  gitPath,
-		tmpl:     make(map[string]*template.Template),
+		cfg:        cfg,
+		box:        box,
+		store:      st,
+		sessions:   newSessionStore(),
+		limiter:    newLimiter(10, 15*time.Minute),
+		clones:     &counter{m: make(map[string]int)},
+		pending:    newPendingSignups(),
+		totpSetups: &totpSetups{m: make(map[string]totpSetup)},
+		reposDir:   filepath.Join(cfg.DataDir, "repos"),
+		gitPath:    gitPath,
+		tmpl:       make(map[string]*template.Template),
 	}
 	css, err := assets.ReadFile("static/style.css")
 	if err != nil {
@@ -151,6 +153,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/keys/delete", s.requireUser(s.handleKeyDelete))
 	mux.HandleFunc("GET /settings/password", s.requireUser(s.handlePassword))
 	mux.HandleFunc("POST /settings/password", s.requireUser(s.handlePasswordChange))
+	mux.HandleFunc("GET /settings/2fa", s.requireUser(s.handleTwoFactor))
+	mux.HandleFunc("POST /settings/2fa/recovery", s.requireUser(s.handleRecoveryCodes))
+	mux.HandleFunc("POST /settings/2fa/totp", s.requireUser(s.handleTOTPSetup))
+	mux.HandleFunc("POST /settings/2fa/totp/confirm", s.requireUser(s.handleTOTPConfirm))
 	mux.HandleFunc("GET /settings/invites", s.requireAdmin(s.handleInvites))
 	mux.HandleFunc("POST /settings/invites", s.requireAdmin(s.handleInviteCreate))
 	mux.HandleFunc("POST /settings/invites/revoke", s.requireAdmin(s.handleInviteRevoke))

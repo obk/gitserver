@@ -331,3 +331,62 @@ func TestCodeAlertsMigration(t *testing.T) {
 		t.Fatalf("user_version %d (schemaVersion %d): older versions would refuse the database", version, schemaVersion)
 	}
 }
+
+func TestRecoveryCodesStore(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "alice"})
+	s.Create(&User{Name: "bob"})
+	if err := s.SetRecoveryCodes("alice", []string{"h1", "h2"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.RecoveryCodesLeft("alice"); n != 2 {
+		t.Fatalf("%d codes left, want 2", n)
+	}
+	if ok, err := s.UseRecoveryCode("bob", "h1"); ok || err != nil {
+		t.Fatalf("bob used alice's code: %v %v", ok, err)
+	}
+	if ok, err := s.UseRecoveryCode("alice", "h1"); !ok || err != nil {
+		t.Fatalf("code not accepted: %v %v", ok, err)
+	}
+	if ok, _ := s.UseRecoveryCode("alice", "h1"); ok {
+		t.Fatal("code accepted twice")
+	}
+	// A new set replaces the old one.
+	s.SetRecoveryCodes("alice", []string{"h3"})
+	if ok, _ := s.UseRecoveryCode("alice", "h2"); ok {
+		t.Fatal("old code still works after new codes were made")
+	}
+	if n, _ := s.RecoveryCodesLeft("alice"); n != 1 {
+		t.Fatalf("%d codes left, want 1", n)
+	}
+	// Codes go with the account.
+	s.SetRecoveryCodes("bob", []string{"b1"})
+	s.Delete("bob")
+	var rows int
+	s.db.QueryRow(`SELECT count(*) FROM recovery_codes WHERE user = 'bob'`).Scan(&rows)
+	if rows != 0 {
+		t.Fatal("codes left after deleting the user")
+	}
+	// Databases from before recovery_codes get it on open, same version.
+	if _, err := s.db.Exec(`DROP TABLE recovery_codes`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetRecoveryCodes("alice", []string{"h4"}); err != nil {
+		t.Fatalf("table not added on open: %v", err)
+	}
+	var version int
+	s.db.QueryRow(`PRAGMA user_version`).Scan(&version)
+	if version != 1 {
+		t.Fatalf("user_version %d", version)
+	}
+}
