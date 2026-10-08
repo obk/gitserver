@@ -677,8 +677,14 @@ func TestUnreachableCommits(t *testing.T) {
 	run("push", "-q", "git@git.test:~alice/pub", "main")
 	leak := run("rev-parse", "HEAD")
 	run("reset", "-q", "--hard", "HEAD~1")
-	run("push", "-q", "-f", "git@git.test:~alice/pub", "main")
 	good := run("rev-parse", "HEAD")
+	// Move the branch back on the server itself: a force push would delete
+	// the commit from disk (TestForcePushCleanup), but older repositories or
+	// a failed cleanup can still hold unreachable commits.
+	repoDir := gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "pub")
+	if out, err := exec.Command("git", "--git-dir="+repoDir, "update-ref", "refs/heads/main", good).CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
 
 	anon := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for _, p := range []string{"/commit/" + leak, "/commit/" + leak[:4], "/tree?h=" + leak, "/tree/secret.txt?h=" + leak[:7],
@@ -966,4 +972,74 @@ func TestNewAuthenticator(t *testing.T) {
 		t.Fatalf("old authenticator still works: %d", status)
 	}
 	e.login("alice")
+}
+
+// A push that removes commits (force push, deleted branch) deletes them from
+// the server's disk; ordinary pushes leave the repository alone.
+func TestForcePushCleanup(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+	dir := filepath.Join(e.work, "alice-pub-src")
+	repoDir := gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "pub")
+	run := func(args ...string) string {
+		out, err := e.git("alice", dir, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	onDisk := func(obj string) bool {
+		return exec.Command("git", "--git-dir="+repoDir, "cat-file", "-e", obj).Run() == nil
+	}
+	// An unreferenced object, to see whether a push runs the cleanup.
+	out, err := exec.Command("sh", "-c", "echo dangling | git --git-dir="+repoDir+" hash-object -w --stdin").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dangling := strings.TrimSpace(string(out))
+
+	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("AWS_SECRET=hunter2\n"), 0o644)
+	run("add", "secret.txt")
+	run("commit", "-q", "-m", "oops")
+	if out := run("push", "git@git.test:~alice/pub", "main"); strings.Contains(out, "deleting") {
+		t.Fatalf("a fast-forward push ran the cleanup:\n%s", out)
+	}
+	leak := run("rev-parse", "HEAD")
+	blob := run("rev-parse", "HEAD:secret.txt")
+	if !onDisk(dangling) || !onDisk(leak) {
+		t.Fatal("a fast-forward push deleted objects")
+	}
+
+	run("reset", "-q", "--hard", "HEAD~1")
+	out2 := run("push", "-f", "git@git.test:~alice/pub", "main")
+	if !strings.Contains(out2, "deleting them from the server's disk") || !strings.Contains(out2, "gone from the server") {
+		t.Fatalf("no cleanup message:\n%s", out2)
+	}
+	for name, obj := range map[string]string{"commit": leak, "blob": blob, "dangling object": dangling} {
+		if onDisk(obj) {
+			t.Errorf("force-pushed %s still on disk", name)
+		}
+	}
+	if b, _ := exec.Command("grep", "-r", "hunter2", repoDir).Output(); len(b) > 0 {
+		t.Errorf("secret still found on disk:\n%s", b)
+	}
+	// The repository is intact.
+	if out, err := exec.Command("git", "--git-dir="+repoDir, "fsck", "--no-dangling").CombinedOutput(); err != nil {
+		t.Fatalf("fsck after cleanup: %v\n%s", err, out)
+	}
+	if _, err := e.git("bob", e.work, "clone", "-q", "git@git.test:~alice/pub", "after-cleanup"); err != nil {
+		t.Fatalf("clone after cleanup: %v", err)
+	}
+
+	// Deleting a branch removes its commits too.
+	run("checkout", "-q", "-b", "wip")
+	os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("draft\n"), 0o644)
+	run("add", "wip.txt")
+	run("commit", "-q", "-m", "wip")
+	run("push", "-q", "git@git.test:~alice/pub", "wip")
+	wip := run("rev-parse", "HEAD")
+	run("push", "-q", "git@git.test:~alice/pub", ":wip")
+	if onDisk(wip) {
+		t.Error("commit of a deleted branch still on disk")
+	}
 }
