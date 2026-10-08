@@ -1,0 +1,11 @@
+[Unit]
+Description=gitserver: weekly git fsck of every repository
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+# Runs at the next boot if the server was off at the time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

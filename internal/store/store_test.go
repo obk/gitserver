@@ -442,6 +442,8 @@ func TestAuditLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Create(&User{Name: "bob"})
+	defer func(n int) { maxAudit = n }(maxAudit)
+	maxAudit = 50
 	start := time.Now().Add(-time.Hour).Truncate(time.Second)
 	for i := range maxAudit + 5 {
 		if err := s.Audit(AuditEntry{At: start.Add(time.Duration(i) * time.Second), Actor: "admin", Action: "invite created", Target: fmt.Sprint(i)}); err != nil {
@@ -452,7 +454,7 @@ func TestAuditLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Delete("bob")
-	list, err := s.AuditLog(maxAudit * 2)
+	list, err := s.AuditLog("", maxAudit*2)
 	if err != nil || len(list) != maxAudit {
 		t.Fatalf("%d entries kept, want %d: %v", len(list), maxAudit, err)
 	}
@@ -461,6 +463,16 @@ func TestAuditLog(t *testing.T) {
 	}
 	if list[1].Target != fmt.Sprint(maxAudit+4) || list[maxAudit-1].Target != "6" {
 		t.Fatalf("not newest first, or the wrong ones pruned: %s ... %s", list[1].Target, list[maxAudit-1].Target)
+	}
+	// Each user sees what they did and what was done to them.
+	s.Audit(AuditEntry{Actor: "carol", Action: "SSH key added", Target: "carol"})
+	s.Audit(AuditEntry{Actor: "command line", Action: "admin rights given", Target: "dave"})
+	s.Audit(AuditEntry{Actor: "dave", Action: "invite created"})
+	if l, _ := s.AuditLog("dave", 10); len(l) != 2 || l[0].Action != "invite created" || l[1].Target != "dave" {
+		t.Fatalf("dave's log: %+v", l)
+	}
+	if l, _ := s.AuditLog("carol", 10); len(l) != 1 {
+		t.Fatalf("carol's log: %+v", l)
 	}
 	// Databases from before the audit log get it on open.
 	s.db.Exec(`DROP TABLE audit_log`)

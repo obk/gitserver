@@ -1,0 +1,30 @@
+# Weekly integrity check of every repository (see gitserver-fsck.timer).
+# Problems show up in: journalctl -u gitserver-fsck
+[Unit]
+Description=gitserver: check repositories with git fsck
+Documentation=file:///usr/local/share/doc/gitserver/WIKI.md
+
+[Service]
+Type=oneshot
+User=git
+Group=git
+ExecStart=/usr/local/bin/gitserver fsck -data /var/lib/gitserver
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/gitserver
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native

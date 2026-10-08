@@ -53,6 +53,9 @@ Usage:
   gitserver ssh-keys USER TYPE KEY                    sshd AuthorizedKeysCommand (see deploy/)
   gitserver ssh-serve USER                            forced command for SSH keys
   gitserver backup FILE                               consistent snapshot of the database
+  gitserver audit [-n 50] [USER]                      the audit log, of everyone or about USER
+  gitserver fsck                                      check every repository with git fsck (weekly timer)
+  gitserver mirror-sync                               fetch the pull mirrors that are due (timer)
   gitserver demo [-listen ADDR]                       throwaway local server with sample data
   gitserver update [-f] [VERSION]                     on an installed server: download the newest
                                                       release and install it (runs gitserverctl update)
@@ -89,6 +92,12 @@ func main() {
 		err = cmdDemo(os.Args[2:])
 	case "backup":
 		err = cmdBackup(os.Args[2:])
+	case "audit":
+		err = cmdAudit(os.Args[2:])
+	case "fsck":
+		err = cmdFsck(os.Args[2:])
+	case "mirror-sync":
+		err = cmdMirrorSync(os.Args[2:])
 	case "update":
 		err = cmdUpdate(os.Args[2:])
 	case "version":
@@ -357,11 +366,12 @@ func cmdSSHKeys(args []string) error {
 // cmdSSHServe: gitserver ssh-serve USER, the forced command (see sshgit.Serve).
 func cmdSSHServe(args []string) error {
 	fs, data := newFlagSet("ssh-serve")
+	key := fs.String("key", "", "ID of the SSH key used (recorded as its last use)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("invalid forced command")
 	}
-	return sshgit.Serve(*data, fs.Arg(0))
+	return sshgit.Serve(*data, fs.Arg(0), *key)
 }
 
 func cmdBackup(args []string) error {
@@ -656,7 +666,7 @@ var gitserverctl = "/usr/local/sbin/gitserverctl"
 // downloads and installs a release as root.
 func cmdUpdate(args []string) error {
 	if _, err := os.Stat(gitserverctl); err != nil {
-		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see the README's Updating section")
+		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see Updating in WIKI.md")
 	}
 	return syscall.Exec(gitserverctl, append([]string{gitserverctl, "update"}, args...), os.Environ())
 }
@@ -679,4 +689,38 @@ func preReceiveHook() {
 		}
 		os.Exit(1)
 	}
+}
+
+// cmdAudit: gitserver audit [-n N] [USER]. On the web each user only sees
+// the entries about themselves; the server operator sees them all here.
+func cmdAudit(args []string) error {
+	fs, data := newFlagSet("audit")
+	n := fs.Int("n", 50, "how many entries, newest first")
+	fs.Parse(args)
+	if fs.NArg() > 1 || *n < 1 {
+		return errUsage
+	}
+	st, err := store.Open(*data)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	entries, err := st.AuditLog(fs.Arg(0), *n)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		line := e.At.Local().Format(time.DateTime) + "  " + e.Actor + ": " + e.Action
+		if e.Target != "" {
+			line += " " + e.Target
+		}
+		if e.Detail != "" {
+			line += " (" + e.Detail + ")"
+		}
+		if e.IP != "" {
+			line += " from " + e.IP
+		}
+		fmt.Println(line)
+	}
+	return nil
 }

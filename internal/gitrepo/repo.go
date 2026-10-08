@@ -30,6 +30,7 @@ type Repo struct {
 	Description string
 	Public      bool
 	Protected   []string // branch patterns, see protect.go
+	Mirror      string   // source URL if this is a pull mirror, see mirror.go
 	Updated     time.Time
 }
 
@@ -67,6 +68,7 @@ func Load(reposDir, owner, name string) (*Repo, error) {
 	_, err := os.Stat(filepath.Join(dir, publicMarker))
 	r.Public = err == nil
 	r.Protected = Protected(dir)
+	r.Mirror = readSmallFile(filepath.Join(dir, mirrorFile))
 	return r, nil
 }
 

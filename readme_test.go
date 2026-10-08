@@ -10,17 +10,17 @@ import (
 	"testing"
 )
 
-// TestReadmeCodeLinks keeps README.md's code links honest: every link of the
+// TestReadmeCodeLinks keeps WIKI.md's code links honest: every link of the
 // form [`name`](file#L12) must point at a line that contains `name`. When code
 // moves, this fails and says which link to update.
 func TestReadmeCodeLinks(t *testing.T) {
-	readme, err := os.ReadFile("README.md")
+	readme, err := os.ReadFile("WIKI.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	links := regexp.MustCompile("\\[`([^`]+)`\\]\\(([^)#\\s]+)#L([0-9]+)\\)").FindAllStringSubmatch(string(readme), -1)
 	if len(links) < 50 {
-		t.Fatalf("only %d code links found in README.md", len(links))
+		t.Fatalf("only %d code links found in WIKI.md", len(links))
 	}
 	files := map[string][]string{}
 	for _, l := range links {
@@ -30,7 +30,7 @@ func TestReadmeCodeLinks(t *testing.T) {
 		if !ok {
 			b, err := os.ReadFile(file)
 			if err != nil {
-				t.Errorf("README links to missing file %s", file)
+				t.Errorf("WIKI.md links to missing file %s", file)
 				continue
 			}
 			lines = strings.Split(string(b), "\n")
@@ -44,7 +44,7 @@ func TestReadmeCodeLinks(t *testing.T) {
 					break
 				}
 			}
-			t.Errorf("README.md: [`%s`](%s#L%d) is out of date (first match is now line %d)", name, file, n, want)
+			t.Errorf("WIKI.md: [`%s`](%s#L%d) is out of date (first match is now line %d)", name, file, n, want)
 		}
 	}
 }

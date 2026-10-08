@@ -1,13 +1,13 @@
-# Publishes README.md as the GitHub wiki, one page per section (tools/wiki).
+# Publishes WIKI.md as the GitHub wiki, one page per section (tools/wiki).
 # The wiki must exist first: open the Wiki tab on GitHub and save any first
-# page. Every run replaces all pages, so edit README.md, not the wiki.
+# page. Every run replaces all pages, so edit WIKI.md, not the wiki.
 name: wiki
 
 on:
   push:
     branches: [main]
     paths:
-      - README.md
+      - WIKI.md
       - tools/wiki/**
       - .github/workflows/wiki.yml
   workflow_dispatch:
@@ -48,6 +48,6 @@ jobs:
             exit 0
           fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit --quiet -m "Update from README.md at ${GITHUB_SHA::7}"
+            commit --quiet -m "Update from WIKI.md at ${GITHUB_SHA::7}"
           git push --quiet origin HEAD
           echo "Published $(ls "$RUNNER_TEMP"/pages | wc -l) pages to https://github.com/${GITHUB_REPOSITORY}/wiki"

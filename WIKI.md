@@ -1,0 +1,767 @@
+# gitserver
+
+A small, self-hosted git server written in Go, styled after sourcehut's [git.sr.ht](https://git.sr.ht).
+
+It's a single program that gives you:
+
+- a **web UI** to browse repositories: summary with README, file tree, log, refs, commits with diffs, and syntax highlighting
+- **git over SSH** for pushing and private repos: `git@git.example.com:~you/project`
+- **read-only HTTPS clone** for public repos: `https://git.example.com/~you/project`
+- **accounts with mandatory two-factor login** (password + authenticator app), invite-only signup, and SSH keys
+- a ready-made **VPS installer** that sets up Caddy (automatic HTTPS), Anubis (bot protection), OpenSSH, the firewall, automatic security updates, fail2ban and systemd
+
+There's no JavaScript in the web UI and no external services. All data lives on your server.
+
+---
+
+## Contents
+
+1. [How it works](#how-it-works)
+2. [Try it locally](#try-it-locally)
+3. [Requirements](#requirements)
+4. [Installing on a VPS](#installing-on-a-vps)
+5. [Updating](#updating)
+6. [Using it](#using-it)
+7. [Administration](#administration)
+8. [Backups and restore](#backups-and-restore)
+9. [Access rules](#access-rules)
+10. [Security](#security)
+11. [Configuration reference](#configuration-reference)
+12. [Files on the server](#files-on-the-server)
+13. [Troubleshooting](#troubleshooting)
+14. [Uninstalling](#uninstalling)
+15. [Development](#development)
+16. [Limitations](#limitations)
+17. [Credits](#credits)
+
+---
+
+## How it works
+
+```
+browser        ─▶ Caddy :443 (HTTPS) ─▶ Anubis ─▶ gitserver   web UI          (Unix sockets between them)
+git clone      ─▶ Caddy :443 (HTTPS) ────────────▶ gitserver   public repos, read-only
+git push/pull  ─▶ OpenSSH :22, user "git" ─▶ gitserver ssh-serve ─▶ git   SSH key login
+```
+
+- **Caddy** terminates HTTPS. It gets a Let's Encrypt certificate automatically and renews it.
+- **[Anubis](https://github.com/TecharoHQ/anubis)** sits in front of the web UI. It gives browsers a one-time proof-of-work check, so AI scrapers and crawlers can't hammer every commit and diff page. Git clients can't solve that check, so Caddy sends git's clone requests directly to gitserver.
+- **gitserver** serves the web UI and HTTPS clones. It listens on a Unix socket, `/run/gitserver/http.sock`, not on a network port, so it's never directly reachable from the internet. Caddy, Anubis and gitserver talk to each other only over Unix sockets that just the `gitserver-http` group (Caddy and Anubis) may open, so other users on the server can't reach them either.
+- **Git over SSH** uses the server's normal OpenSSH with a dedicated `git` user. When you connect, sshd asks `gitserver ssh-keys` whether your key belongs to an account. If it does, the only thing that key can run is `gitserver ssh-serve`, which checks permissions and starts git. There's no shell, no port forwarding and no terminal. Your own admin SSH login is not affected.
+- **Data:** repositories are plain bare git repositories on disk. Users, SSH keys and invites are in a SQLite database. The 2FA secrets in it are encrypted with a key kept outside the database.
+
+---
+
+## Try it locally
+
+You need Go 1.26+ and git.
+
+```sh
+make build        # or: go build -o gitserver ./cmd/gitserver
+./gitserver demo
+```
+
+`demo` starts a throwaway server on <http://127.0.0.1:8080> with:
+
+- an admin account: username `demo`, password `demo-password`, and the current 2FA code, which is printed in the terminal every 30 seconds
+- a public repo `~demo/hello` and a private repo `~demo/secret-notes`
+- an invite link, to try the signup flow (you'll need any SSH public key)
+- simulated git over SSH, so you can clone and push without an SSH server. The demo prints a `GIT_SSH_COMMAND=...` line:
+
+  ```sh
+  export GIT_SSH_COMMAND=/tmp/gitserver-demo-.../ssh
+  git clone git@demo:~demo/hello
+  ```
+
+Everything is deleted when you press Ctrl-C. Use `-listen 127.0.0.1:9000` if port 8080 is taken. The demo only listens on loopback addresses, because its admin password is printed above.
+
+To run with data that is kept, use your own authenticator app:
+
+```sh
+./gitserver user add -admin -data ./data yourname   # asks for SSH public key, password, shows a QR code
+./gitserver serve -data ./data -insecure            # -insecure: allow login over plain http (local only!)
+```
+
+The 2FA encryption key is created at `./data/secret.key` the first time.
+
+---
+
+## Requirements
+
+**Server**
+- Debian 12+, Ubuntu 24.04+, or Fedora/RHEL with systemd. On Ubuntu 22.04 and RHEL, Caddy must come from Caddy's own repository or EPEL first; the installer stops with a hint if it can't find it.
+- amd64 or arm64.
+- OpenSSH server (any current version) and git 2.31+. The installer installs git; every current distro qualifies.
+- **RAM: 1 GB plus 1 GB swap minimum, 2 GB recommended.** Idle use is small: gitserver ~25 MB, Anubis ~30 MB, Caddy ~45 MB. Each login's password check briefly uses 64 MB, so a burst of logins can push gitserver to about 500 MB.
+- **Disk:** ~3 GB for the OS plus your repositories.
+
+**Network**
+- A domain name, e.g. `git.example.com`, with an **A record** (and an AAAA record only if the server really has working IPv6) pointing at the server.
+- Ports **22** (SSH: your login and git), **80** (Let's Encrypt and the redirect to HTTPS) and **443** (web UI and HTTPS clone) reachable from the internet. If your hosting provider has its own firewall (e.g. the DigitalOcean Cloud Firewall), open them there too.
+
+**Each user needs**
+- git and an SSH key (`ssh-keygen -t ed25519`)
+- an authenticator app: Aegis, 2FAS, Google Authenticator, 1Password, …
+
+---
+
+## Installing on a VPS
+
+### Option A: download a release (recommended)
+
+Every release on GitHub has a ready-made bundle; nothing needs to be built. On the server, as root:
+
+```sh
+case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+cd /tmp
+wget -N https://github.com/obk/gitserver/releases/latest/download/gitserver-linux-$ARCH.tar.gz \
+        https://github.com/obk/gitserver/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS    # must say OK
+rm -rf bundle && tar -xzf gitserver-linux-$ARCH.tar.gz
+DOMAIN=git.example.com sh bundle/deploy/install.sh
+```
+
+Use `sudo` before `sh` if you're not root. For a specific version, replace `latest/download` with `download/0.0.1` (the version tag). Without `wget`, use `curl -fLO URL` for each file.
+
+### Option B: from your computer with `make deploy`
+
+```sh
+ssh root@git.example.com      # once, to accept the server's host key; then exit
+make deploy HOST=root@git.example.com DOMAIN=git.example.com
+```
+
+This builds the Linux binary, copies a bundle to the server, and runs the installer there. If your computer has never connected to the server before, `make deploy` stops and tells you to run the `ssh` command above first. Otherwise SSH would silently wait for you to confirm the host key. For an ARM server, add `ARCH=arm64`.
+
+### Option C: build the bundle yourself
+
+```sh
+make bundle                                               # creates dist/gitserver-<version>-linux-amd64.tar.gz
+scp dist/gitserver-*-linux-amd64.tar.gz root@server:/tmp/
+ssh root@server
+tar -xzf /tmp/gitserver-*-linux-amd64.tar.gz -C /tmp
+sudo sh /tmp/bundle/deploy/install.sh
+```
+
+### What the installer asks
+
+When run in a terminal without `DOMAIN` set, it asks for:
+
+1. **Domain name**, e.g. `git.example.com`. It warns if DNS doesn't point at this server yet.
+2. **Site name** shown in the page header (default: the domain).
+3. **Email for Let's Encrypt** expiry notices (optional).
+4. **Confirmation** of the summary.
+5. **Firewall:** if `ufw` is installed but off (as on a fresh Ubuntu droplet), whether to turn it on, allowing only SSH, 80 and 443. If ufw or firewalld is already on, whether to open 80/443 if they're blocked.
+6. At the end: **create the first admin account now?** You'll paste the SSH *public* key from your own computer (`cat ~/.ssh/id_ed25519.pub`), choose a password, and scan a QR code with your authenticator app.
+
+With `DOMAIN=…` set (as `make deploy` does), it skips the domain questions. See [installer variables](#installer-environment-variables) for fully unattended installs.
+
+### What the installer does
+
+1. Installs `git`, `caddy`, `curl` and `openssl` from your distribution, and **Anubis 1.27.0** from its GitHub release, checking the package's SHA-256.
+2. Creates the system user **`git`** (home `/var/lib/gitserver`, no password, no usable shell).
+3. Creates the **2FA encryption key** `/etc/gitserver/secret.key` (root only). It's never replaced on later runs.
+4. Installs `/usr/local/bin/gitserver`, the admin helper `/usr/local/sbin/gitserverctl`, the sandboxed systemd service, and `gitserver.socket`, which creates gitserver's socket. Creates the group **`gitserver-http`**, the only one allowed to open that socket.
+5. Configures **Anubis**: a persistent signing key, a bot policy, and Unix sockets for its traffic and metrics. Anubis runs with the `gitserver-http` group (a systemd drop-in).
+6. Configures **Caddy** for your domain and adds it to the `gitserver-http` group (a systemd drop-in). If `/etc/caddy/Caddyfile` is the distribution's placeholder, it's backed up and replaced with one that imports the gitserver site and moves Caddy's admin API from `127.0.0.1:2019` to a Unix socket only Caddy can open. An existing Caddyfile of your own only gets an `import` line, and the installer tells you how to move the admin API yourself.
+7. Adds **`/etc/ssh/sshd_config.d/50-gitserver.conf`**, a `Match User git` block. It checks the result with `sshd -t` and **rolls back automatically** if sshd rejects it, so it can't break your SSH access.
+8. **Firewall** (see above). Before enabling ufw, it detects every port your SSH server listens on (including custom ports and Ubuntu's `ssh.socket`) and allows those first, so you can't lock yourself out.
+9. **Security updates and SSH protection** (Debian and Ubuntu):
+   - turns on **automatic security updates** (`unattended-upgrades`, daily). It never reboots on its own; when an update needs a reboot, the login message says so. If you turned them off yourself (`APT::Periodic::Unattended-Upgrade "0"`), the installer leaves that alone and warns.
+   - installs **fail2ban** with a jail for SSH: an address with 5 failed logins within 10 minutes is blocked from your SSH ports for an hour (`/etc/fail2ban/jail.d/gitserver.conf`). It reads sshd's log from the journal and blocks with nftables. Bots guessing passwords on port 22 are the most common attack on any VPS; password logins are already refused for the `git` user, and this keeps the noise and load down for every account.
+
+   Skip either with `AUTO_UPDATES=0` or `FAIL2BAN=0`. On Fedora/RHEL the installer only prints how to set up `dnf-automatic` and fail2ban yourself.
+10. Installs the **background jobs**, systemd timers that run as the `git` user: a weekly `git fsck` of every repository (`gitserver-fsck.timer`) and the pull-mirror sync (`gitserver-mirror.timer` every 15 minutes, and `gitserver-mirror.path` for "Sync now").
+11. Enables and starts everything, then checks that all three services run and that gitserver answers.
+12. Waits up to 2 minutes for the **HTTPS certificate** and reports whether it was issued.
+
+It ends with a summary: URLs, certificate status, SSH host key fingerprints, and next steps.
+
+Everything runs **in the background** as systemd services and starts on boot. You can log out right after installing.
+
+> **Save the 2FA key.** Copy `/etc/gitserver/secret.key` into your password manager (`sudo cat /etc/gitserver/secret.key`). Without it nobody can log in, and backups of the database can't be decrypted. See [Backups](#backups-and-restore).
+
+### After installing
+
+```sh
+ssh git@git.example.com          # from your computer
+# Hi ~yourname! You've successfully authenticated, but there is no shell access.
+```
+
+Then open `https://git.example.com`, log in, create a repository, and push.
+
+---
+
+## Updating
+
+On the server:
+
+```sh
+sudo gitserverctl update          # or: sudo gitserver update
+```
+
+It downloads the newest release for your CPU from GitHub with a progress bar, checks it against the release's `SHA256SUMS` (on a mismatch it stops and changes nothing), and runs the release's installer. If you already run that version, it says so and stops; `-f` reinstalls it anyway. A specific release: `sudo gitserverctl update 0.2.0`.
+
+Servers installed before `update` existed don't have it yet. Update them once by hand, with the same commands as in [Option A](#option-a-download-a-release-recommended) without `DOMAIN=…`:
+
+```sh
+case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+cd /tmp
+wget -N https://github.com/obk/gitserver/releases/latest/download/gitserver-linux-$ARCH.tar.gz \
+        https://github.com/obk/gitserver/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+rm -rf bundle && tar -xzf gitserver-linux-$ARCH.tar.gz
+sh bundle/deploy/install.sh
+```
+
+Or from your computer, with your own build: `make update HOST=root@git.example.com`.
+
+Re-running `install.sh` (or `make update`) runs as a **quick update** when gitserver is already installed:
+
+- **no questions:** domain, site name and email are read from the existing setup
+- **no package installs**, unless something is missing
+- **only files whose content changed are replaced**, and **only affected services restart**: gitserver for a new binary or unit, Anubis for a new policy; Caddy is *reloaded* without downtime. If nothing changed, nothing restarts. If an earlier run was interrupted, a re-run finishes the restarts it missed.
+- a **progress bar** for each step, a spinner with the elapsed time while something slow runs (package installs, waiting for a service or the certificate), and a one-line summary:
+
+```
+[██████████░░░░░░░░] 4/7  Caddy (HTTPS)
+      · site config unchanged
+...
+Updated git.example.com: gitserver binary.
+  Version:  a1b2c3d -> e4f5a6b
+```
+
+Your data, the 2FA key and the Anubis signing key are never touched.
+
+> **Updating from a version that used localhost ports** (`127.0.0.1:8080` and `8923`): just run the installer again. It moves gitserver, Anubis and Caddy to Unix sockets, keeps your Anubis signing key, and restarts the three services once (a few seconds of downtime). To change settings (domain, site name, email, firewall), run with `RECONFIGURE=1`:
+
+```sh
+make deploy HOST=root@git.example.com DOMAIN=git.example.com RECONFIGURE=1
+```
+
+Package-manager output goes to `/var/log/gitserver-install.log`; on errors, the installer shows its last lines.
+
+---
+
+## Using it
+
+### Logging in
+
+Go to `https://git.example.com/login` and enter username, password and the 6-digit code from your authenticator app. Each code works only once.
+
+The first visit to any page may briefly show Anubis' "Making sure you're not a bot!" page. It needs JavaScript once, then sets a cookie valid for 7 days. The gitserver pages themselves use no JavaScript.
+
+### SSH keys
+
+**Settings → SSH keys.** Paste the contents of `~/.ssh/id_ed25519.pub`:
+
+- **Accepted types:** ed25519 (recommended), ECDSA, hardware security keys (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-…`), and RSA of at least 2048 bits. DSA is rejected.
+- **One key, one account:** a key can belong to only one account.
+- **At least one key:** you can't delete your last key, and an account without keys is sent to this page after login.
+- **Limit:** up to 20 keys per account.
+- **Instant effect:** deleting a key revokes its SSH access immediately.
+- **Last used:** the list shows when each key last connected (a clone, push or `ssh git@…`), or *never*. A key you don't recognize or haven't used in months is a good one to delete.
+
+### Repositories
+
+- **Create:** **New repository** → name, optional description, private (default) or public. Names may use letters, digits, `.`, `_` and `-`, up to 100 characters, and must not end in `.git`.
+- **Settings tab** (owner only): change the description, visibility or protected branches, or **delete** the repository (type its name to confirm; this can't be undone).
+- **Protected branches:** list branches in the settings tab (e.g. `main`, or `release/*`, where `*` matches within one part of the name). Pushes that would delete them or force-push over their commits are refused as a whole, with a message saying why; pushing new commits on top works as usual. Since a force push deletes the dropped commits from the server for good, protect at least your main branch. Tags aren't covered.
+- **Downloads:** any branch or tag as `.tar.gz` or `.zip` (made by `git archive`), from the summary and the refs tab, or at `…/~owner/repo/archive/NAME.tar.gz` (a tag: `archive/refs/tags/v1.0.zip`). The files have one top folder, `repo-NAME/`. Downloads count toward the same limits as HTTPS clones.
+- **Pull mirrors:** fill in **Mirror of** when creating a repository (or in its settings) with a public `https://` URL, e.g. `https://github.com/owner/repo.git`. gitserver copies all its branches and tags and keeps them up to date about every hour; **Sync now** in the settings fetches at once. Branches and tags deleted at the source go away here too, and the default branch follows the source's. Nobody can push to a mirror; clear the field to turn it into an ordinary repository that keeps what it has. Only public sources work (no passwords or tokens), and only on the public internet: addresses in your private network, `localhost` and cloud metadata services are refused, see [Security](#server). If a sync fails, the settings page says why.
+- **Your repos** are listed at `https://git.example.com/~you`. The front page shows your repos plus everyone's public ones.
+- **Browsing:** the web UI shows a summary (latest commits, README rendered from Markdown, clone URLs), file tree, files with line numbers and syntax highlighting, a raw file download, the commit log (50 per page), commits with highlighted diffs, branches and tags.
+- **Line links:** click a line number to highlight that line; then click another number to highlight the range between them, and copy the address bar to share it, e.g. `…/tree/main.go?lines=12-20#L12`. Clicking the highlighted line again, or **Clear**, removes the highlight. A plain `#L12` link highlights one line too. It works without JavaScript; each click reloads the page.
+- **Search tab:** finds text in the repository's files with `git grep`, on the default branch, or on a branch or tag with `?h=NAME`. It searches for exactly what you type (no patterns), optionally ignoring case, skips binary files, and links each hit to its line. It shows up to 200 lines, at most 20 per file.
+- **Compare:** on the refs tab, **Compare** (or *compare* next to a branch) shows the commits on one branch, tag or commit that another doesn't have, and the diff from where they forked, like a pull request. `…/compare?from=main&to=feature`.
+- **Atom feeds:** subscribe to a repository's commits at `…/~owner/repo/log.atom` (one branch: `log.atom?h=NAME`) and to its tags at `…/~owner/repo/tags.atom`. Each has the newest 30 entries. Feed readers can't log in, so only feeds of public repositories work in them.
+
+### Cloning and pushing
+
+| | URL | Works for |
+|---|---|---|
+| HTTPS (read-only) | `https://git.example.com/~owner/repo` | public repos, anyone, no account needed |
+| SSH | `git@git.example.com:~owner/repo` | everything your account may access; **the only way to push** |
+| SSH, URL form | `ssh://git@git.example.com/~owner/repo` | same as above |
+
+```sh
+# new project
+git remote add origin git@git.example.com:~you/project
+git push -u origin main
+
+# cloned over HTTPS, but you want to push: push over SSH
+git remote set-url --push origin git@git.example.com:~you/project
+```
+
+Pushing over HTTPS is refused with a message that shows the SSH URL. Note the **`git@`** and the **`:`** in SSH URLs: without `git@`, SSH logs in as your local username and fails.
+
+**Force-pushing or deleting a branch or tag deletes the removed commits from the server for good**, so a secret pushed by mistake is really gone once you force-push over it. Make sure your own copy has anything you still need, and [protect](#repositories) the branches that must never lose history. Such pushes take a moment longer and say so.
+
+### Inviting people
+
+Admins see **Settings → invites**. Create a link valid for 1, 7 or 30 days, optionally making the new user an admin. Send it privately; anyone with the link can use it once. The invited person:
+
+1. opens the link, then picks a username, a password (12+ characters) and pastes their SSH public key
+2. scans the 2FA QR code and enters one code
+3. is logged in and shown 10 **recovery codes**, once, to save somewhere safe. The account only exists once that code checks out.
+
+Each admin sees, and can revoke, only the unused invites they created; invites made with `gitserverctl` show up only there. Usernames are lowercase letters, digits, `-` and `_`, up to 32 characters. About 860 reserved names (`admin`, `root`, `support`, `api`, …) are blocked, so nobody can pose as staff.
+
+### Sessions and logins
+
+**Settings → security** shows where you're logged in right now (browser, IP address, last activity), with a button to log out any of those sessions or all others at once. Below it are your last 20 logins: when, from which IP address and browser, and how (password and authenticator code, recovery code, or signup).
+
+Right after you log in, a note at the top of the page shows your previous login. If you don't recognize a login, change your password, set up a new authenticator under two-factor, and log out the other sessions.
+
+### Two-factor and recovery codes
+
+**Settings → two-factor** shows how many recovery codes you have left:
+
+- **Recovery codes:** if you lose your phone, log in with your password and one of your recovery codes, typed into the code field instead of the 6-digit code. Each code works once. New accounts get 10 at signup; you can make a new set at any time (the old ones stop working). They're shown only once, right after they're made.
+- **New authenticator:** after logging in with a recovery code, or when moving to a new phone, set up a new authenticator here: scan the QR code and confirm with one code. The old app stops working and all your other sessions are logged out.
+
+Both need your current password. Accounts created with `gitserverctl user add` start without recovery codes; make them on this page.
+
+### Audit log
+
+**Settings → audit log** lists the changes to your account, newest first, with when and from which IP address:
+
+- what you did: SSH keys added or deleted, password changes, new authenticators and recovery codes, invites created or revoked, your signup
+- what was done to your account by the server's administrator with `gitserverctl` (shown as "command line", with the name of whoever ran `sudo`): user created, password or authenticator reset, admin rights given or removed, keys added or deleted
+
+Only you see your list; admins don't see other people's. Logins are in your [login history](#sessions-and-logins). Repository events aren't in it.
+
+### Deleting your account
+
+At the bottom of **Settings → security**. Type your user name and enter your password and an authenticator (or recovery) code. Your account, SSH keys, unused invites **and all your repositories, private and public, are deleted at once**; this can't be undone, so clone anything you want to keep first. Your user name stays reserved for good, so nobody can take your place. The only admin can't delete their account; make someone else an admin first.
+
+### Password
+
+**Settings → password.** It needs your current password and a 2FA code, and logs out all your other sessions.
+
+### Landing page text
+
+Logged-out visitors see a welcome page with your public repositories. Put your own text in `/var/lib/gitserver/intro.md` (Markdown; raw HTML is ignored). Changes show up immediately.
+
+---
+
+## Administration
+
+On the server, use **`gitserverctl`**. It runs gitserver as the `git` user with the right data folder and the 2FA key, and re-runs itself with `sudo` if needed.
+
+```sh
+sudo gitserverctl status     # are gitserver, Anubis and Caddy running?
+sudo gitserverctl logs       # follow all logs (Ctrl-C to stop)
+sudo gitserverctl restart    # restart all three
+sudo gitserverctl update     # install the newest release (see Updating)
+sudo gitserverctl fsck       # check every repository now (also runs weekly)
+sudo gitserverctl help       # list all commands
+```
+
+### Users
+
+```sh
+sudo gitserverctl user list                           # name, role, number of SSH keys
+sudo gitserverctl user add -admin NAME                # create an account (SSH key, password, QR code)
+sudo gitserverctl user passwd NAME                    # set a new password (forgotten password)
+sudo gitserverctl user totp NAME                      # new authenticator (lost phone); shows a new QR code
+sudo gitserverctl user admin NAME true|false          # grant/revoke admin (= may create invites)
+sudo gitserverctl user key list NAME                  # SSH keys with IDs and fingerprints
+sudo gitserverctl user key add NAME 'ssh-ed25519 AAAA… comment'
+sudo gitserverctl user key del NAME KEY-ID
+sudo gitserverctl user del NAME                       # delete the account (repos stay on disk)
+```
+
+Changing a password or 2FA ends all of that user's sessions immediately. Deleting a user revokes their SSH access at once and removes their unused invites. Unlike deleting your own account on the web, `user del` keeps their repositories in `/var/lib/gitserver/repos/NAME/` until you remove them. A user name can be taken only once: after deletion it stays reserved for good, so nobody can take over the old account's repositories or invites. To give the repositories to someone else, move the folder to their name.
+
+### Invites
+
+```sh
+sudo gitserverctl invite create -base-url https://git.example.com            # 7 days
+sudo gitserverctl invite create -admin -expires 24h -base-url https://git.example.com
+sudo gitserverctl invite list                  # everyone's invites, with who created them
+sudo gitserverctl invite revoke ID
+```
+
+### Repositories
+
+```sh
+sudo gitserverctl repo list
+sudo gitserverctl repo create -public -desc "My project" '~owner/name'
+sudo gitserverctl repo public '~owner/name'
+sudo gitserverctl repo private '~owner/name'
+```
+
+Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME.git` (owned by `git:git`). Create the user first, or use `user add`, which warns about the existing folder; web signup refuses such names. Names that ever had an account can't be used again. A repo is public exactly when the file `git-daemon-export-ok` exists inside it, its description is the file `description`, and its protected branches are listed in `gitserver-protected-branches`, one per line. Hooks in a repository's `hooks/` folder are never run.
+
+### Logs
+
+- Web requests and logins: `journalctl -u gitserver`. Each line has the client IP; failed logins are logged with the IP.
+- Git over SSH, an audit log of every clone, push and rejected command: `journalctl -t gitserver-ssh`.
+- Anubis and Caddy: `journalctl -u anubis@gitserver`, `journalctl -u caddy`, and `/var/log/caddy/gitserver.log`.
+- Blocked SSH addresses: `sudo fail2ban-client status sshd`.
+- The whole [audit log](#audit-log), of every user (on the web each user only sees their own): `sudo gitserverctl audit` (newest 50; `-n 200` for more, or a user name for one user).
+- Background jobs: `journalctl -u gitserver-fsck` (repository checks) and `journalctl -u gitserver-mirror` (mirror syncs).
+
+### Disk and repository checks
+
+Admins see **Settings → disk**: free space on the server, and the size and number of repositories of each user (without repository names, so private ones stay private), plus the result of the last repository check.
+
+That check is `git fsck` on every repository, run weekly by `gitserver-fsck.timer`, so damage from a failing disk shows up while your snapshots still have a good copy. Each repository is checked while no push to it is running. Damaged ones are listed in `journalctl -u gitserver-fsck`, and the disk page shows how many there are. To check now: `sudo gitserverctl fsck`.
+
+---
+
+## Backups and restore
+
+Back up three things:
+
+| What | Where | How |
+|---|---|---|
+| Repositories | `/var/lib/gitserver/repos/` | copy the directory (rsync, restic, borg, …) |
+| Database (users, keys, invites) | `/var/lib/gitserver/gitserver.db` | `sudo gitserverctl backup /var/lib/gitserver/backup-$(date +%F).db`, then copy that file |
+| **2FA key** | `/etc/gitserver/secret.key` | once, into your password manager, **separately** from the backups |
+
+`gitserverctl backup` writes a consistent snapshot while the server runs. Don't just copy `gitserver.db`: recent changes may still be in `gitserver.db-wal`. Backup files are created with mode `0600`.
+
+Keeping the key apart from the backups is deliberate: a stolen backup can't reveal anyone's 2FA secret. If you lose the key, the data is still fine, but every user has to re-enroll 2FA (`gitserverctl user totp NAME`).
+
+**Restore** on a fresh install of the same version:
+
+```sh
+sudo systemctl stop gitserver
+sudo cp backup.db /var/lib/gitserver/gitserver.db
+sudo rm -f /var/lib/gitserver/gitserver.db-wal /var/lib/gitserver/gitserver.db-shm
+sudo rsync -a repos/ /var/lib/gitserver/repos/
+sudo cp secret.key /etc/gitserver/secret.key && sudo chmod 600 /etc/gitserver/secret.key
+sudo chown -R git:git /var/lib/gitserver
+sudo systemctl start gitserver
+```
+
+If the key doesn't match the database, gitserver refuses to start and says so.
+
+---
+
+## Access rules
+
+| | Anonymous | Logged-in user | Owner |
+|---|---|---|---|
+| Public repo: browse, search, compare, Atom feeds | ✔ | ✔ | ✔ |
+| Public repo: clone over HTTPS | ✔ | ✔ | ✔ |
+| Public repo: clone over SSH | needs an account | ✔ | ✔ |
+| Private repo: see, browse, search, feeds, clone | ✘ (404) | ✘ (404) | ✔ |
+| Push, settings, delete | ✘ | ✘ | ✔ |
+| Delete the account (with all its repositories) | ✘ | own account only | ✔ |
+| Create invites, see and revoke your own | ✘ | admins only | (admins only) |
+| See the audit log of your own account | ✘ | ✔ | ✔ |
+
+**Admins have no extra access to repositories.** They can create invites and see the disk page, which shows no repository names; the server operator manages everything else from the command line.
+
+---
+
+## Security
+
+Every claim below links to the code that implements it. On this server and on GitHub, the links open the file at that line. `make test` checks that each link still points at the named code ([`TestReadmeCodeLinks`](readme_test.go#L16)).
+
+### Accounts
+
+- **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
+- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L148).
+- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L613).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L595), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
+- **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L457), [`run`](deploy/gitserverctl#L18).
+  - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
+  - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L167).
+  - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
+  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
+- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L549), [`TakeCodeFailures`](internal/store/store.go#L557).
+- **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L85).
+  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
+  - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
+  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L181), [`safeNext`](internal/web/login.go#L17).
+- **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L896), [`RedeemInvite`](internal/store/store.go#L975).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded; each user sees the entries about their own account, and the server operator sees all of them with `gitserverctl audit`. There are no repository names in it. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L282), [`cliAudit`](cmd/gitserver/main.go#L652).
+
+### Git
+
+- **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6), [`AuthorizedKeys`](internal/sshgit/ssh.go#L101), [`authorizedKeyLine`](internal/sshgit/ssh.go#L142).
+  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](internal/sshgit/ssh.go#L213), [`sshRepoArgRe`](internal/sshgit/ssh.go#L210), [`Serve`](internal/sshgit/ssh.go#L230), [`syscall.Exec`](internal/sshgit/ssh.go#L313).
+  - The sshd config applies only to the `git` user. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6).
+  - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](internal/web/server_test.go#L211).
+- **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit and end after 30 minutes, so stalled clients can't hold the slots, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](internal/web/gitclone.go#L30), [`cloneTimeout`](internal/web/gitclone.go#L28), [`gitHTTPRe`](internal/web/gitclone.go#L17), [`cloneSlots`](internal/web/gitclone.go#L20), [`Authorization`](internal/web/gitclone.go#L80).
+- **Removed commits are deleted from disk:** a push that force-pushes over commits, deletes a branch or tag, or moves a tag runs `git gc --prune=now` right after it, so a leaked secret is gone from the server, not just hidden. Normally git would keep such commits for two weeks. The push shows a line saying so and takes a little longer; ordinary pushes don't change. Pushes to the same repository wait for each other, including this cleanup, so it can't delete objects that another push is writing. That's why there's no grace period, which would also have kept the commits of a quick "oops, force-push" alive. Code: [`receivePack`](internal/sshgit/push.go#L34), [`historyRemoved`](internal/sshgit/push.go#L131), [`LockPush`](internal/sshgit/push.go#L94).
+- **Protected branches and hooks:** every push runs git with `core.hooksPath` set to a temporary folder holding only gitserver's own `pre-receive` hook, so hooks inside a repository folder never run. That hook refuses the whole push, before any ref changes, if it deletes a protected branch or moves one to a commit that doesn't contain the old one. Code: [`hookDir`](internal/sshgit/hook.go#L33), [`PreReceive`](internal/sshgit/hook.go#L63), [`IsProtected`](internal/gitrepo/protect.go#L73).
+- **Unreachable commits are never served:** commits no branch or tag reaches (in repositories from before the cleanup above, or if it failed) are not shown. The web UI only shows reachable commits, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. Code: [`reachable`](internal/gitrepo/git.go#L146), [`Git-Protocol`](internal/web/gitclone.go#L82), [`version=1`](internal/sshgit/ssh.go#L297).
+- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L208), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L269).
+- **Hardening:**
+  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L41), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L185), [`Command`](internal/gitrepo/git.go#L56).
+  - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](internal/gitrepo/git.go#L198).
+  - web git processes are capped and time out after 30 s Code: [`gitSlots`](internal/gitrepo/git.go#L41), [`Timeout`](internal/gitrepo/git.go#L22).
+- **Limits per account and client,** so one user or address can't fill the disk or take all the capacity:
+  - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](internal/sshgit/ssh.go#L166), [`minFreeDisk`](internal/sshgit/ssh.go#L167).
+  - each user runs at most 4 git operations over SSH at once. The count is kept in lock files that git holds until it exits, so crashed processes free their slot Code: [`MaxGitPerUser`](internal/sshgit/ssh.go#L168), [`AcquireUserSlot`](internal/sshgit/ssh.go#L179).
+  - each client address (IPv6: each /64) runs at most 2 HTTPS clones or archive downloads at once Code: [`clonesPerIP`](internal/web/gitclone.go#L24).
+  - each user can create at most 100 repositories in the web UI; the command line isn't limited Code: [`maxReposPerUser`](internal/web/repos.go#L36).
+  - to change a limit, edit the constant and rebuild.
+
+### Web
+
+- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
+- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L86).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L535), [`sandbox`](internal/web/repos.go#L565), [`Content-Disposition`](internal/web/repos.go#L570), [`RawContentType`](internal/render/markdown.go#L85).
+- **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
+- **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L381), [`Compare`](internal/gitrepo/git.go#L447), [`validRev`](internal/gitrepo/git.go#L104).
+- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
+
+### Server
+
+- **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
+- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L578).
+- **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
+- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L676), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
+- **Mirrors can't reach inside your network (SSRF):** since users choose a mirror's URL, a careless fetch could reach services only the server can reach, like `localhost`, your private network or the cloud provider's metadata service (`169.254.169.254`). Mirror sources must be `https://` without credentials; the host name is resolved and every address must be a public internet one; git is then pinned to that checked address (`http.curloptResolve`, git 2.37+), so the name can't be switched to an inside address in between. Redirects, proxies, other protocols and credential helpers are off. The sync runs as its own sandboxed systemd job, not in the web server. Code: [`IsPublic`](internal/outbound/outbound.go#L35), [`syncMirror`](internal/gitrepo/mirror.go#L156), [`curloptResolve`](internal/gitrepo/mirror.go#L180).
+- **Background jobs are sandboxed too:** the repository check has no network at all (`PrivateNetwork=yes`); both jobs run as the `git` user and can only write to `/var/lib/gitserver`. Code: [`PrivateNetwork`](deploy/gitserver-fsck.service#L23), [`RestrictAddressFamilies`](deploy/gitserver-mirror.service#L30).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L447), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
+
+---
+
+## Configuration reference
+
+### `gitserver serve` flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-data DIR` | `$GITSERVER_DATA` or `./data` | data folder (all commands accept it) |
+| `-listen ADDR` | `127.0.0.1:8080` | `host:port` for TCP; `unix:/path/to.sock` for a Unix socket (mode `0660`); `systemd` for the socket systemd passes in (socket activation, as `gitserver.socket` does) |
+| `-base-url URL` | from request | public URL, e.g. `https://git.example.com`, used for clone and invite links |
+| `-ssh-host HOST` | host of `-base-url` | host shown in SSH clone URLs |
+| `-site NAME` | `git` | site name in the page header |
+| `-tls-cert FILE -tls-key FILE` | – | serve HTTPS directly (without Caddy) |
+| `-trust-proxy` | off | trust the reverse proxy's `X-Forwarded-*` headers |
+| `-real-ip-header NAME` | – | with `-trust-proxy`: header holding the client IP (`X-Real-IP` behind Caddy) |
+| `-insecure` | off | allow login cookies over plain HTTP, **for local testing only** |
+
+### Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `GITSERVER_DATA` | default data folder |
+| `GITSERVER_KEY` | 2FA encryption key as 64 hex characters (used by `gitserverctl`) |
+| `GITSERVER_KEY_FILE` | path to the key file |
+| `CREDENTIALS_DIRECTORY` | set by systemd; the key is read from `secret.key` in it |
+
+The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GITSERVER_KEY_FILE`, then `<data>/secret.key`, which is created automatically for local use.
+
+### Installer environment variables
+
+| Variable | Meaning |
+|---|---|
+| `DOMAIN` | domain name; skips the domain questions |
+| `SITE_NAME` | header name (default: domain) |
+| `ACME_EMAIL` | email for Let's Encrypt expiry notices |
+| `ENABLE_UFW=1` | turn on ufw (SSH, 80, 443) without asking |
+| `AUTO_UPDATES=0` | don't turn on automatic security updates |
+| `FAIL2BAN=0` | don't install fail2ban |
+| `RECONFIGURE=1` | full install with questions, even if already installed |
+| `CERT_WAIT_SECONDS` | how long to wait for the certificate (default 120) |
+| `ANUBIS_VERSION`, `ANUBIS_SHA256` | install another Anubis version (needs its checksum) |
+| `BIN` | path to the gitserver binary (default: next to `deploy/`) |
+
+### Limits
+
+| | |
+|---|---|
+| SSH keys per account | 20 |
+| Session lifetime | 12 h (2 h idle) |
+| Login attempts | 10 failures per 15 min (per IP; per account for wrong 2FA codes) |
+| Invite validity | 1, 7 or 30 days (web); any duration (CLI) |
+| Signup | 15 minutes between step 1 and the 2FA confirmation |
+| Recovery codes | 10 per account, each usable once |
+| Login history | the last 20 logins per account |
+| Audit log | the last 5000 entries for all users together (each user's page shows their newest 200) |
+| SSH login failures | 5 within 10 min block the address for 1 h (fail2ban) |
+| File view | files up to 1 MiB are shown; larger ones via "View raw" |
+| Syntax highlighting | files up to 512 KiB / 2 s; diffs up to 1 MiB |
+| Diff view | up to 2 MiB, then truncated |
+| Log | 50 commits per page |
+| Atom feeds | the newest 30 commits or tags |
+| Search | 200 characters; up to 200 matching lines, at most 20 per file; 1 MiB of `git grep` output; 30 s |
+| Compare | the newest 250 commits; the diff like the commit view |
+| Push size | 1 GiB per push; pushes stop while less than 1 GiB of disk is free |
+| Git over SSH | 4 operations at once per user |
+| HTTPS clone and archive download | 2 at once per client address (IPv6: per /64); 30 min each |
+| Protected branches | 20 names or patterns per repository |
+| Repositories | 100 per user from the web UI (the command line isn't limited) |
+| Mirrors | synced about hourly (checked every 15 min); 10 min per sync; paused while less than 1 GiB of disk is free |
+
+---
+
+## Files on the server
+
+| Path | What |
+|---|---|
+| `/usr/local/bin/gitserver` | the program |
+| `/usr/local/sbin/gitserverctl` | admin helper |
+| `/var/lib/gitserver/` | data (`git:git`, `0700`) |
+| `/var/lib/gitserver/gitserver.db` | SQLite database (+ `-wal`, `-shm`) |
+| `/var/lib/gitserver/repos/OWNER/NAME.git` | bare repositories |
+| `/var/lib/gitserver/intro.md` | optional landing page text |
+| `/var/lib/gitserver/fsck-status.json`, `mirror-sync-now` | result of the last repository check; touched to start a mirror sync |
+| `/var/lib/gitserver/repos/OWNER/NAME.git/gitserver-*` | per-repository settings: protected branches, mirror source and its last sync |
+| `/etc/gitserver/secret.key` | 2FA encryption key (root, `0600`) |
+| `/etc/systemd/system/gitserver.service`, `gitserver.socket` | systemd unit and the socket it listens on |
+| `/etc/systemd/system/gitserver-fsck.{service,timer}`, `gitserver-mirror.{service,timer,path}` | background jobs: weekly `git fsck`, mirror sync |
+| `/run/gitserver/http.sock` | gitserver's socket (`git:gitserver-http`, `0660`) |
+| `/run/anubis/gitserver/anubis.sock`, `metrics.sock` | Anubis' sockets (group `gitserver-http`, `0660`) |
+| `/run/caddy/admin.sock` | Caddy's admin API (`caddy` only) |
+| `/etc/systemd/system/anubis@gitserver.service.d/gitserver.conf`, `caddy.service.d/gitserver.conf` | drop-ins that add Anubis and Caddy to the `gitserver-http` group |
+| `/etc/ssh/sshd_config.d/50-gitserver.conf` | sshd config for the `git` user |
+| `/etc/fail2ban/jail.d/gitserver.conf` | fail2ban jail for SSH |
+| `/etc/apt/apt.conf.d/20auto-upgrades` | turns on automatic security updates (written only if not already set) |
+| `/etc/anubis/gitserver.env`, `gitserver.botPolicies.yaml` | Anubis config and bot policy |
+| `/etc/caddy/gitserver.caddy` (+ `/etc/caddy/Caddyfile`, see the installer steps) | Caddy site |
+| `/var/log/caddy/gitserver.log` | Caddy access log |
+| `/var/log/gitserver-install.log` | installer log |
+
+Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `fail2ban-gitserver.conf`, `gitserver-fsck.*`, `gitserver-mirror.*`, `gitserverctl`, `install.sh`.
+
+---
+
+## Troubleshooting
+
+**`make deploy` stops with "has not connected to … before".** Run `ssh root@server` once, check the fingerprint, answer `yes`, and try again.
+
+**`git push`: `Permission denied (publickey)` and the message shows `you@server`, not `git@server`.** The remote URL is missing `git@`. Fix it:
+`git remote set-url origin git@git.example.com:~owner/repo`.
+
+**`ssh git@server`: `Permission denied (publickey)`.**
+- Is the key added under Settings → SSH keys? Is your SSH client offering it? Check with `ssh -v git@server`.
+- On Fedora/RHEL with SELinux, check `ausearch -m avc -ts recent`.
+
+**`Repository not found` when cloning.** Over HTTPS, only public repositories can be cloned; clone private ones over SSH. Over SSH, check the owner and name (`~owner/repo`) and that you're the owner or the repo is public.
+
+**HTTPS certificate "NOT issued".**
+- The domain's A record must point at the server.
+- An AAAA (IPv6) record must only exist if the server really answers on that IPv6 address. Let's Encrypt prefers IPv6.
+- Ports 80 and 443 must be open in ufw *and* in your provider's firewall.
+- Check with `journalctl -u caddy | grep -iE 'acme|challenge|certificate'`. Caddy keeps retrying on its own.
+
+**2FA code not accepted.**
+- Check the phone's clock; codes allow only ±30 s.
+- Each code works once, so wait for the next one.
+- Lost phone: log in with a recovery code, then set up a new authenticator under Settings → two-factor. No codes left: `sudo gitserverctl user totp NAME`.
+
+**"Too many failed attempts".** Wait 15 minutes. The limit is per IP for wrong passwords.
+
+**gitserver doesn't start: "this key does not match the database" / "key … is missing".** Restore `/etc/gitserver/secret.key` from your password manager, then `sudo systemctl restart gitserver`. If the key is truly lost, temporarily move the database aside to start fresh, or re-enroll every user's 2FA.
+
+**The page says "Making sure you're not a bot!" and doesn't continue.** That's Anubis. Enable JavaScript for the site once; the cookie lasts 7 days.
+
+**`502 Bad Gateway` or Anubis errors like "permission denied" on a socket.** Caddy or Anubis can't open `/run/gitserver/http.sock` or `/run/anubis/gitserver/anubis.sock`. Run the installer again: it recreates the `gitserver-http` group, the drop-ins and the sockets, and restarts whatever is missing them. To check by hand: `ls -l /run/gitserver/http.sock /run/anubis/gitserver/anubis.sock` (both group `gitserver-http`, `srw-rw----`) and `grep Groups /proc/$(systemctl show -p MainPID --value caddy)/status` (must include the group's ID from `getent group gitserver-http`).
+
+**SSH to the server suddenly times out or says "Connection refused", from one place only.** fail2ban has probably blocked your address after failed logins (often a wrong key or user name, tried a few times). Wait an hour, or connect from elsewhere (or your provider's web console) and run `sudo fail2ban-client status sshd` to see blocked addresses and `sudo fail2ban-client set sshd unbanip YOUR.IP` to unblock. To never block an address, add it to `ignoreip` in `/etc/fail2ban/jail.d/gitserver.conf` and run `sudo systemctl reload fail2ban`; the installer keeps your edit unless the file in `deploy/` changes.
+
+**Anything else:** `sudo gitserverctl status` and `sudo gitserverctl logs`.
+
+---
+
+## Uninstalling
+
+```sh
+sudo systemctl disable --now gitserver.socket gitserver anubis@gitserver \
+  gitserver-fsck.timer gitserver-mirror.timer gitserver-mirror.path
+sudo rm /etc/ssh/sshd_config.d/50-gitserver.conf && sudo systemctl try-reload-or-restart ssh   # 'sshd' on Fedora
+sudo rm /etc/caddy/gitserver.caddy /etc/systemd/system/caddy.service.d/gitserver.conf
+# In /etc/caddy/Caddyfile, remove the "import /etc/caddy/gitserver.caddy" line and the
+# "{ admin unix//run/caddy/admin.sock }" block (the original, if any, is Caddyfile.orig.*).
+sudo rm -r /etc/systemd/system/gitserver.service /etc/systemd/system/gitserver.socket /etc/systemd/system/gitserver-fsck.* \
+  /etc/systemd/system/gitserver-mirror.* \
+  /etc/systemd/system/anubis@gitserver.service.d /usr/local/bin/gitserver /usr/local/sbin/gitserverctl
+sudo systemctl daemon-reload && sudo systemctl restart caddy && sudo groupdel gitserver-http
+# Data and keys; back them up first if you want to keep them:
+#   /var/lib/gitserver  /etc/gitserver  /etc/anubis/gitserver.*
+```
+
+---
+
+## Development
+
+```sh
+make build        # ./gitserver
+make test         # go vet + all tests (real git; includes the SSH forced-command flow)
+make dist         # linux amd64 + arm64 binaries in dist/
+make bundle       # deploy bundle for ARCH (default amd64)
+./gitserver demo
+```
+
+**Project layout.** The program is one binary, built from `cmd/gitserver`. Everything else is in `internal/`, split by job; each package only imports the ones listed above it:
+
+| Folder | What |
+|---|---|
+| `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `update`, `ssh-keys`, `ssh-serve`, the background jobs `fsck` and `mirror-sync`, and the pre-receive hook) and `demo` |
+| `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
+| `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
+| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
+| `internal/outbound/` | which addresses the server may connect to for users (mirrors) |
+| `internal/gitrepo/` | repositories on disk and the git commands that read them; protected branches, mirrors, `git fsck`, disk usage |
+| `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
+| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `account.go`, `repos.go`, `search.go`, `compare.go`, `feed.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
+| `deploy/` | installer and server configs |
+| `tools/wiki/` | turns this file (WIKI.md) into the GitHub wiki |
+| `test/smoke/` | container that acts as a fresh VPS, for testing the installer |
+| `readme_test.go` | checks the code links in this file |
+
+Tests sit next to the code they test. The tests in `internal/web` run a full server with real git, including the SSH key lookup and forced command (they build the binary first).
+
+The input checks that face attackers (SSH command, revisions, tree paths, login redirects, README links) have fuzz tests in each package's `fuzz_test.go`. `make test` runs their seed inputs; to search for new failures, run one for a while, e.g. `go test -run '^$' -fuzz '^FuzzSafeNext$' -fuzztime 5m ./internal/web`. A failing input is saved under that package's `testdata/fuzz/` and then runs with every `make test`.
+
+**Releases.** Push a version tag and GitHub Actions (`.github/workflows/release.yml`) runs the tests, builds the amd64 and arm64 bundles and publishes them as a GitHub Release with `SHA256SUMS`:
+
+```sh
+git tag 0.0.2 && git push origin 0.0.2
+```
+
+Or on GitHub: **Actions → release → Run workflow**, enter the version (e.g. `0.0.2`); this tags the latest commit of the branch you pick (normally `main`).
+
+The bundle names don't contain the version, so the `latest/download` links in [Option A](#option-a-download-a-release-recommended) always get the newest release.
+
+**Docs.** `README.md` is only the short introduction; everything else is in this file, `WIKI.md`. The [GitHub wiki](https://github.com/obk/gitserver/wiki) is WIKI.md split into one page per section by `tools/wiki`; `.github/workflows/wiki.yml` publishes it on every push to `main` that changes WIKI.md, so edit WIKI.md, never the wiki (changes made there are overwritten). Links between sections and to files keep working on the wiki; a link to a heading that doesn't exist fails the build. To see the pages locally: `go run ./tools/wiki -repo obk/gitserver -out /tmp/wiki`. The wiki has to exist before the first run: on GitHub, open the **Wiki** tab and save the first page (any text), then run **Actions → wiki → Run workflow**.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs gofmt, `make test` and [govulncheck](https://go.dev/doc/security/vuln/) on every push and pull request. Once a week it also fuzzes every target for 5 minutes and checks for newly published vulnerabilities.
+
+To smoke-test the installer locally without a VPS:
+
+```sh
+podman build -t gitserver-smoke test/smoke
+podman run -d --name gs --privileged --systemd=always -p 127.0.0.1:2223:22 -p 127.0.0.1:8444:443 gitserver-smoke
+make bundle && podman cp dist/gitserver-*-linux-amd64.tar.gz gs:/tmp/b.tgz
+podman exec gs sh -c 'mkdir /tmp/b && tar -C /tmp/b --strip-components=1 -xzf /tmp/b.tgz'
+podman exec -e DOMAIN=localhost gs sh /tmp/b/deploy/install.sh
+```
+
+`DOMAIN=localhost` makes Caddy use a local certificate instead of Let's Encrypt.
+
+---
+
+## Limitations
+
+- **No collaborators:** only a repository's owner can push.
+- **No HTTPS cloning of private repositories:** that would need HTTPS credentials. Private repos are SSH-only.
+- **Restarts log everyone out:** sessions are kept in memory. (Warnings about wrong 2FA codes are kept in the database and survive restarts.)
+- **Not in the web UI:** issues, pull requests, CI and webhooks. This is a git host, not a forge.
+- **Mirrors are one-way and public-only:** they pull from a public https repository; mirroring private sources or pushing to other servers isn't supported.
+- **Manual recovery:** a lost password needs the server admin (`gitserverctl user passwd`), and so does a lost phone once all recovery codes are used up (`gitserverctl user totp`).
+
+## Credits
+
+- Look inspired by [sourcehut](https://sourcehut.org) and [stagit](https://codemadness.org/stagit.html)
+- [Anubis](https://github.com/TecharoHQ/anubis) by Techaro (bot protection), [Caddy](https://caddyserver.com) (HTTPS)
+- Go libraries:
+  - [chroma](https://github.com/alecthomas/chroma) for syntax highlighting
+  - [goldmark](https://github.com/yuin/goldmark) for Markdown
+  - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) for the database
+  - [rsc.io/qr](https://pkg.go.dev/rsc.io/qr) for QR codes
+  - [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto) for argon2 and SSH
+- Username blocklists from [shouldbee/reserved-usernames](https://github.com/shouldbee/reserved-usernames) and [marteinn/The-Big-Username-Blocklist](https://github.com/marteinn/The-Big-Username-Blocklist) (MIT, see `internal/account/blocklists/`)

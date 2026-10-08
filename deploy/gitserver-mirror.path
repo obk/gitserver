@@ -1,0 +1,10 @@
+# The web UI writes this file for "Sync now" (it can't start units itself).
+[Unit]
+Description=gitserver: sync pull mirrors when asked
+
+[Path]
+PathModified=/var/lib/gitserver/mirror-sync-now
+Unit=gitserver-mirror.service
+
+[Install]
+WantedBy=paths.target

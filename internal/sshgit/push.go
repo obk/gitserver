@@ -36,7 +36,7 @@ func receivePack(gitPath string, argv, env []string, repo *gitrepo.Repo, audit f
 	// cleanup must still finish.
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE, syscall.SIGINT)
 
-	lock, err := lockPush(repo)
+	lock, err := LockPush(repo)
 	if err != nil {
 		return err
 	}
@@ -89,9 +89,9 @@ func receivePack(gitPath string, argv, env []string, repo *gitrepo.Repo, audit f
 	return nil
 }
 
-// lockPush waits for other pushes to repo to finish (including their
+// LockPush waits for other pushes to repo to finish (including their
 // cleanup) and returns the held lock; closing it releases the lock.
-func lockPush(repo *gitrepo.Repo) (*os.File, error) {
+func LockPush(repo *gitrepo.Repo) (*os.File, error) {
 	f, err := os.OpenFile(filepath.Join(repo.Dir, "gitserver-push.lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err

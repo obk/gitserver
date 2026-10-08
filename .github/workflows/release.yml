@@ -7,7 +7,7 @@
 #
 # The release holds one ready-to-install bundle per architecture under a
 # fixed name, so ".../releases/latest/download/gitserver-linux-amd64.tar.gz"
-# always points at the newest one (see "Installing on a VPS" in README.md),
+# always points at the newest one (see "Installing on a VPS" in WIKI.md),
 # plus SHA256SUMS to check the download.
 name: release
 

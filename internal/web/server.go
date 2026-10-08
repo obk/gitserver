@@ -164,7 +164,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /settings/invites", s.requireAdmin(s.handleInvites))
 	mux.HandleFunc("POST /settings/invites", s.requireAdmin(s.handleInviteCreate))
 	mux.HandleFunc("POST /settings/invites/revoke", s.requireAdmin(s.handleInviteRevoke))
-	mux.HandleFunc("GET /settings/audit", s.requireAdmin(s.handleAudit))
+	mux.HandleFunc("GET /settings/audit", s.requireUser(s.handleAudit))
+	mux.HandleFunc("GET /settings/usage", s.requireAdmin(s.handleUsage))
 	mux.HandleFunc("GET /{owner}", s.handleUserPage)
 	mux.HandleFunc("GET /{owner}/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/"+url.PathEscape(r.PathValue("owner")), http.StatusMovedPermanently)
@@ -172,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{owner}/{repo}/{rest...}", s.handleRepo)
 	mux.HandleFunc("POST /{owner}/{repo}/settings", s.requireUser(s.handleRepoSettings))
 	mux.HandleFunc("POST /{owner}/{repo}/delete", s.requireUser(s.handleRepoDelete))
+	mux.HandleFunc("POST /{owner}/{repo}/mirror/sync", s.requireUser(s.handleMirrorSync))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { s.notFound(w, r) })
 
 	h := s.requireSSHKey(mux)

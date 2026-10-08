@@ -1,0 +1,20 @@
+{{define "content"}}{{with .Data}}<div>
+<h3>Disk</h3>
+{{if .Total}}<p><b>{{size .Free}}</b> free of {{size .Total}} ({{.UsedPercent}}% used). Pushes stop while less than 1 GiB is free.</p>
+<meter class="disk" min="0" max="100" low="75" high="90" optimum="0" value="{{.UsedPercent}}">{{.UsedPercent}}%</meter>
+{{end}}
+<h3>Repositories by user</h3>
+{{if .Owners}}<table class="list">
+<thead><tr><th>User</th><th class="num">Repositories</th><th class="num">Size</th></tr></thead>
+<tbody>
+{{range .Owners}}<tr><td>~{{.Owner}}</td><td class="num">{{.Repos}}</td><td class="num">{{size .Bytes}}</td></tr>
+{{end}}<tr class="total"><td><b>All</b></td><td class="num"><b>{{.Repos}}</b></td><td class="num"><b>{{size .Bytes}}</b></td></tr>
+</tbody>
+</table>
+<p class="muted">Repository names aren't shown, so private repositories stay private. Folders of deleted users still count.</p>
+{{else}}<p class="muted">No repositories yet.</p>{{end}}
+<h3>Repository check</h3>
+{{with .Fsck}}{{if .Broken}}<div class="alert"><b>{{.Broken}} of {{.Checked}} repositories are damaged</b> (checked <span title="{{datefull .At}}">{{ago .At}}</span>). See which with <code>journalctl -u gitserver-fsck</code> on the server, and restore them from a snapshot or backup.</div>
+{{else}}<p class="ok">All {{.Checked}} repositories were fine when checked <span title="{{datefull .At}}">{{ago .At}}</span>.</p>{{end}}
+{{else}}<p class="muted">Not checked yet. <code>git fsck</code> runs weekly; to run it now: <code>sudo gitserverctl fsck</code>.</p>{{end}}
+</div>{{end}}{{end}}

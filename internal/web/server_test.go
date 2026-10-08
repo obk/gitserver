@@ -247,7 +247,7 @@ func TestGitSSH(t *testing.T) {
 	line, _ := os.ReadFile(e.pubKeys["alice"])
 	f := strings.Fields(string(line))
 	out2, _ := exec.Command(testBinary, "ssh-keys", "-data", e.data, "git", f[0], f[1]).Output()
-	if !strings.HasPrefix(string(out2), `restrict,command="`) || !strings.Contains(string(out2), " ssh-serve -data "+e.data+" alice\" ") {
+	if !strings.HasPrefix(string(out2), `restrict,command="`) || !regexp.MustCompile(` ssh-serve -data `+regexp.QuoteMeta(e.data)+` -key [A-Za-z0-9_-]+ alice" `).Match(out2) {
 		t.Fatalf("bad authorized_keys line: %s", out2)
 	}
 	if out3, _ := exec.Command(testBinary, "ssh-keys", "-data", e.data, "root", f[0], f[1]).Output(); len(out3) != 0 {
@@ -1145,9 +1145,6 @@ func TestAuditLogPage(t *testing.T) {
 	bob := e.login("bob")
 	_, body := e.get(bob, "/settings/keys")
 	e.post(bob, "/settings/keys", url.Values{"csrf": {csrfToken(t, body)}, "key": {newTestKey(t) + " second"}}, "198.51.100.7")
-	if status, _ := e.get(bob, "/settings/audit"); status != http.StatusNotFound {
-		t.Fatalf("non-admin reached the audit log: %d", status)
-	}
 
 	alice := e.login("alice")
 	_, body = e.get(alice, "/settings/invites")
@@ -1166,25 +1163,44 @@ func TestAuditLogPage(t *testing.T) {
 		t.Fatalf("%v: %s", err, out)
 	}
 
-	status, body := e.get(alice, "/settings/audit")
-	if status != 200 {
-		t.Fatalf("audit log: %d\n%s", status, body)
+	// Each user sees only what is about them, admins included.
+	page := func(c *http.Client) string {
+		t.Helper()
+		status, body := e.get(c, "/settings/audit")
+		if status != 200 {
+			t.Fatalf("audit log: %d\n%s", status, body)
+		}
+		return body
 	}
-	for _, want := range []string{
-		"SSH key added <b>bob</b>", "198.51.100.7",
-		"invite created", "id " + invites[0].ID, "makes an admin", "invite revoked",
-		"command line (sudo carol)", "admin rights given <b>bob</b>",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("audit log lacks %q", want)
+	check := func(who, body string, want, not []string) {
+		t.Helper()
+		for _, w := range want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s's audit log lacks %q", who, w)
+			}
+		}
+		for _, n := range not {
+			if strings.Contains(body, n) {
+				t.Errorf("%s's audit log shows %q", who, n)
+			}
 		}
 	}
-	if strings.Contains(body, "secret") {
-		t.Error("audit log mentions a private repository")
+	check("bob", page(bob),
+		[]string{"SSH key added <b>bob</b>", "198.51.100.7", "command line (sudo carol)", "admin rights given <b>bob</b>"},
+		[]string{"invite created", "invite revoked"})
+	check("alice", page(alice),
+		[]string{"invite created", "id " + invites[0].ID, "makes an admin", "invite revoked"},
+		[]string{"SSH key added", "198.51.100.7", "admin rights given", "secret"})
+
+	// The whole log is on the server.
+	out, err := exec.Command(testBinary, "audit", "-data", e.data).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "admin rights given bob") || !strings.Contains(string(out), "invite revoked") ||
+		!strings.Contains(string(out), "198.51.100.7") {
+		t.Fatalf("gitserver audit: %v\n%s", err, out)
 	}
-	list, _ := e.s.store.AuditLog(10)
-	if len(list) != 4 || list[0].Action != "admin rights given" || list[0].IP != "" || list[3].Actor != "bob" {
-		t.Fatalf("entries: %+v", list)
+	if out, _ := exec.Command(testBinary, "audit", "-data", e.data, "-n", "1", "alice").CombinedOutput(); strings.Count(strings.TrimSpace(string(out)), "\n") != 0 ||
+		!strings.Contains(string(out), "invite revoked") {
+		t.Fatalf("gitserver audit -n 1 alice:\n%s", out)
 	}
 }
 
@@ -1263,7 +1279,7 @@ func TestAccountDelete(t *testing.T) {
 	if out, err := e.git("bob", e.work, "ls-remote", "git@git.test:~alice/pub"); err == nil {
 		t.Fatalf("SSH key still works: %s", out)
 	}
-	if l, _ := e.s.store.AuditLog(1); len(l) != 1 || l[0].Action != "account deleted" || l[0].Detail != "1 repositories deleted" {
+	if l, _ := e.s.store.AuditLog("", 1); len(l) != 1 || l[0].Action != "account deleted" || l[0].Detail != "1 repositories deleted" {
 		t.Fatalf("audit: %+v", l)
 	}
 
@@ -1274,5 +1290,59 @@ func TestAccountDelete(t *testing.T) {
 	if code, body := e.post(alice, "/settings/account/delete", url.Values{"csrf": {csrfToken(t, body)}, "confirm": {"alice"},
 		"current": {"alice-password-123"}, "totp": {e.code("alice")}}, ""); code != http.StatusConflict || !strings.Contains(body, "only admin") {
 		t.Fatalf("last admin deleted: %d", code)
+	}
+}
+
+func TestKeyLastUsed(t *testing.T) {
+	e := newTestEnv(t)
+	bob := e.login("bob")
+	if _, body := e.get(bob, "/settings/keys"); !strings.Contains(body, ">never<") {
+		t.Fatalf("unused key not shown as never:\n%s", body)
+	}
+	if out, err := e.git("bob", e.work, "ls-remote", "git@git.test:~bob/notes"); err != nil {
+		t.Fatalf("ls-remote: %v\n%s", err, out)
+	}
+	u, _ := e.s.store.Get("bob")
+	used, _ := e.s.store.KeysLastUsed("bob")
+	if time.Since(used[u.SSHKeys[0].ID]) > time.Minute {
+		t.Fatalf("use not recorded: %v", used)
+	}
+	if _, body := e.get(bob, "/settings/keys"); strings.Contains(body, ">never<") || !strings.Contains(body, "just now") {
+		t.Fatalf("last use not shown:\n%s", body)
+	}
+	// Other account changes keep it; deleting the key drops it.
+	e.s.store.Update("bob", func(u *store.User) error { u.PasswordHash = "x"; return nil })
+	if used, _ := e.s.store.KeysLastUsed("bob"); len(used) != 1 {
+		t.Fatal("updating the account lost the last use")
+	}
+	// Another user's key ID can't be touched through bob.
+	alice, _ := e.s.store.Get("alice")
+	e.s.store.TouchKey("bob", alice.SSHKeys[0].ID, time.Now())
+	if used, _ := e.s.store.KeysLastUsed("alice"); len(used) != 0 {
+		t.Fatal("recorded a use of another user's key")
+	}
+}
+
+func TestUsagePage(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("bob", "notes")
+	if status, _ := e.get(e.login("bob"), "/settings/usage"); status != http.StatusNotFound {
+		t.Fatalf("non-admin reached the usage page: %d", status)
+	}
+	alice := e.login("alice")
+	_, body := e.get(alice, "/settings/usage")
+	for _, want := range []string{"free of", "<meter", "~alice</td><td class=\"num\">2</td>", "~bob</td><td class=\"num\">1</td>", "Not checked yet"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("usage page lacks %q", want)
+		}
+	}
+	for _, name := range []string{"secret", "notes"} {
+		if strings.Contains(body, name) {
+			t.Errorf("usage page shows the repository name %q", name)
+		}
+	}
+	gitrepo.WriteFsckStatus(e.data, gitrepo.FsckStatus{At: time.Now(), Checked: 3, Broken: 1})
+	if _, body := e.get(alice, "/settings/usage"); !strings.Contains(body, "1 of 3 repositories are damaged") {
+		t.Fatalf("fsck result not shown:\n%s", body)
 	}
 }

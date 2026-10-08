@@ -1,0 +1,9 @@
+[Unit]
+Description=gitserver: sync pull mirrors every 15 minutes (each about hourly)
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=2m
+
+[Install]
+WantedBy=timers.target

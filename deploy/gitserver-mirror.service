@@ -1,0 +1,34 @@
+# Fetches the pull mirrors that are due. Started every 15 minutes by
+# gitserver-mirror.timer, and at once by gitserver-mirror.path when someone
+# presses "Sync now". Failures show on the repository's settings page and in:
+# journalctl -u gitserver-mirror
+[Unit]
+Description=gitserver: sync pull mirrors
+Documentation=file:///usr/local/share/doc/gitserver/WIKI.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=git
+Group=git
+ExecStart=/usr/local/bin/gitserver mirror-sync -data /var/lib/gitserver
+TimeoutStartSec=2h
+Nice=10
+UMask=0027
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/gitserver
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
