@@ -48,6 +48,18 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 		return
 	}
 	repo, err := gitrepo.Load(s.reposDir, owner, name)
+	if err != nil && r.Method == http.MethodGet {
+		// Renamed: git follows a redirect of its first request and then
+		// uses the new address (it warns "redirecting to ...").
+		if to, ok := gitrepo.Renamed(s.reposDir, owner, name); ok && to.Public {
+			target := to.Path() + "/" + endpoint
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+	}
 	if err != nil || !repo.Public {
 		// Same answer for private and missing repositories.
 		plain(http.StatusNotFound, "Repository not found. Private repositories can only be cloned over SSH:\n  git clone "+sshURL)

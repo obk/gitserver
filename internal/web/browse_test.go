@@ -244,8 +244,29 @@ func TestCompare(t *testing.T) {
 		t.Fatal("same commit not noticed")
 	}
 	// Without from, the default branch is preselected.
-	if _, body := e.get(anon, "/~alice/pub/compare"); !strings.Contains(body, `name="from" value="main"`) || !strings.Contains(body, `<option value="v1">`) {
-		t.Fatalf("empty compare form:\n%s", body)
+	// The form has drop-downs: branches and tags, the default branch as
+	// "from" and another branch as "to".
+	_, body = e.get(anon, "/~alice/pub/compare")
+	for _, want := range []string{
+		`<select id="from" name="from"><optgroup label="Branches">`,
+		`<optgroup label="Tags"><option value="v1">v1</option></optgroup>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("compare form lacks %s:\n%s", want, body)
+		}
+	}
+	from := body[strings.Index(body, `id="from"`):strings.Index(body, `id="to"`)]
+	to := body[strings.Index(body, `id="to"`):]
+	if !strings.Contains(from, `<option value="main" selected>`) || !strings.Contains(to, `<option value="feature" selected>`) {
+		t.Fatalf("preselected refs:\n%s", body)
+	}
+	// A commit hash from a link stays selected.
+	main := strings.TrimSpace(func() string {
+		out, _ := exec.Command("git", "--git-dir="+gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "pub"), "rev-parse", "main").Output()
+		return string(out)
+	}())
+	if _, body := e.get(anon, "/~alice/pub/compare?from="+main+"&to=feature"); !strings.Contains(body, `<optgroup label="Commit"><option value="`+main+`" selected>`) {
+		t.Fatalf("hash not kept in the form:\n%s", body)
 	}
 	for _, q := range []string{"from=main&to=nope", "from=main..feature&to=main", "from=--all&to=main"} {
 		if code, _ := e.get(anon, "/~alice/pub/compare?"+q); code != http.StatusNotFound {
@@ -472,5 +493,118 @@ func TestMirrorSettings(t *testing.T) {
 	e.post(alice, "/~alice/m/settings", url.Values{"csrf": {csrf}, "description": {""}, "visibility": {"public"}, "mirror": {""}}, "")
 	if out, err := e.git("alice", dir, "push", "git@git.test:~alice/m", "main"); err != nil {
 		t.Fatalf("push after mirroring stopped: %v\n%s", err, out)
+	}
+}
+
+func TestFolderReadme(t *testing.T) {
+	e := newTestEnv(t)
+	dir := filepath.Join(e.work, "readme-src")
+	os.MkdirAll(filepath.Join(dir, "docs", "deep"), 0o755)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "docs", "README.md"), []byte("# Docs\n\nSee [setup](setup.md), [main](../main.go), [deep](deep/) "+
+		"and [far](../../etc/passwd).\n\n![logo](logo.png)\n\n<script>alert(1)</script>\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "docs", "deep", "readme.txt"), []byte("plain <b>text</b>\n"), 0o644)
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"add", "."}, {"commit", "-qm", "x"}, {"tag", "v1"},
+		{"push", "-q", "git@git.test:~alice/pub", "main", "v1"}} {
+		if out, err := e.git("alice", dir, args...); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	anon := &http.Client{}
+	_, body := e.get(anon, "/~alice/pub/tree/docs")
+	for _, want := range []string{
+		`<h1 id="docs">Docs</h1>`,
+		`href="/~alice/pub/tree/docs/setup.md"`,
+		`href="/~alice/pub/tree/main.go"`, // ../ from docs/
+		`href="/~alice/pub/tree/docs/deep"`,
+		`href="../../etc/passwd"`, // leaves the repository: untouched
+		`src="/~alice/pub/raw/docs/logo.png"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("docs/ README lacks %s", want)
+		}
+	}
+	if strings.Contains(body, "<script>alert") {
+		t.Error("raw HTML in a README was rendered")
+	}
+	// On a tag, links stay on it.
+	if _, body := e.get(anon, "/~alice/pub/tree/docs?h=v1"); !strings.Contains(body, `href="/~alice/pub/tree/docs/setup.md?h=v1"`) {
+		t.Errorf("README links leave the tag:\n%s", body)
+	}
+	// A README that isn't Markdown is shown as text.
+	if _, body := e.get(anon, "/~alice/pub/tree/docs/deep"); !strings.Contains(body, "<pre>plain &lt;b&gt;text&lt;/b&gt;\n</pre>") {
+		t.Errorf("text README:\n%s", body)
+	}
+	// No README, nothing shown.
+	if _, body := e.get(anon, "/~alice/pub/tree"); strings.Contains(body, `class="readme`) {
+		t.Error("README shown for a folder without one")
+	}
+}
+
+func TestRepoRename(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+	e.pushInitial("alice", "secret")
+	alice := e.login("alice")
+	noFollow := func(c *http.Client) *http.Client {
+		return &http.Client{Jar: c.Jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	_, body := e.get(alice, "/~alice/pub/settings")
+	csrf := csrfToken(t, body)
+	rename := func(repo, name string) (int, string) {
+		return e.post(alice, "/~alice/"+repo+"/rename", url.Values{"csrf": {csrf}, "name": {name}}, "")
+	}
+	for _, bad := range []string{"secret", "pub", "../x", "x.git", ""} {
+		if code, _ := rename("pub", bad); code == 200 && bad != "" {
+			t.Errorf("renamed to %q", bad)
+		}
+	}
+	if code, body := rename("pub", "project"); code != 200 || !strings.Contains(body, "Renamed.") || !strings.Contains(body, "~alice/project") {
+		t.Fatalf("rename: %d\n%s", code, body)
+	}
+	// The old address leads to the new one, keeping the path and query.
+	resp, err := noFollow(&http.Client{}).Get(e.srv.URL + "/~alice/pub/tree/README?h=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != "/~alice/project/tree/README?h=main" {
+		t.Fatalf("old address: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	// HTTPS clones of the old address work (git follows the redirect).
+	if out, err := e.git("", e.work, "clone", "-q", e.srv.URL+"/~alice/pub", "old-addr"); err != nil {
+		t.Fatalf("clone of the old address: %v\n%s", err, out)
+	}
+	// SSH says where it went.
+	if out, err := e.git("alice", e.work, "ls-remote", "git@git.test:~alice/pub"); err == nil || !strings.Contains(out, "was renamed to ~alice/project") {
+		t.Fatalf("SSH to the old name: %v\n%s", err, out)
+	}
+
+	// A private repository's old name stays a 404 for others.
+	_, body = e.get(alice, "/~alice/secret/settings")
+	rename("secret", "hidden")
+	for _, c := range []*http.Client{{}, e.login("bob")} {
+		if code, _ := e.get(c, "/~alice/secret/"); code != http.StatusNotFound {
+			t.Errorf("private repo's old name: %d", code)
+		}
+	}
+	if out, _ := e.git("bob", e.work, "ls-remote", "git@git.test:~alice/secret"); strings.Contains(out, "hidden") {
+		t.Fatalf("SSH leaked a private repo's new name to bob:\n%s", out)
+	}
+	if resp, _ := noFollow(alice).Get(e.srv.URL + "/~alice/secret/"); resp.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("owner not redirected: %d", resp.StatusCode)
+	}
+	// Only the owner renames.
+	bob := e.login("bob")
+	_, bobBody := e.get(bob, "/settings/keys")
+	if code, _ := e.post(bob, "/~alice/project/rename", url.Values{"csrf": {csrfToken(t, bobBody)}, "name": {"x"}}, ""); code != http.StatusNotFound {
+		t.Fatalf("bob renamed alice's repo: %d", code)
+	}
+	// The command line too.
+	if out, err := exec.Command(testBinary, "repo", "rename", "-data", e.data, "~alice/project", "proj").CombinedOutput(); err != nil {
+		t.Fatalf("repo rename: %v\n%s", err, out)
+	}
+	if resp, _ := noFollow(&http.Client{}).Get(e.srv.URL + "/~alice/pub/"); resp.Header.Get("Location") != "/~alice/proj/" {
+		t.Fatalf("chain not followed: %s", resp.Header.Get("Location"))
 	}
 }

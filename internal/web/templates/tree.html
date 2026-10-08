@@ -16,4 +16,6 @@
 {{range .Entries}}<tr><td class="mode">{{.Mode}}</td><td class="name">{{if .Href}}<a href="{{.Href}}"{{if .IsDir}} class="dir"{{end}}>{{.Name}}{{if .IsDir}}/{{end}}</a>{{else}}{{.Name}} <span class="muted">(submodule)</span>{{end}}</td><td class="size">{{if .IsFile}}{{size .Size}}{{end}}</td></tr>
 {{end}}</tbody>
 </table>
-{{end}}{{end}}{{end}}
+{{if .ReadmeHTML}}<article class="readme markdown">{{.ReadmeHTML}}</article>
+{{else if .ReadmeText}}<article class="readme"><pre>{{.ReadmeText}}</pre></article>
+{{end}}{{end}}{{end}}{{end}}

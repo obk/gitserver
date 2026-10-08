@@ -263,6 +263,13 @@ func Serve(dataDir, name, keyID string) error {
 	}
 	repo, err := gitrepo.Load(filepath.Join(dataDir, "repos"), owner, repoName)
 	write := service == "receive-pack"
+	if err != nil {
+		if to, ok := gitrepo.Renamed(filepath.Join(dataDir, "repos"), owner, repoName); ok && to.CanRead(u) {
+			audit("renamed user=%s service=%s repo=~%s/%s to=%s", u.Name, service, owner, repoName, to.FullName())
+			return fmt.Errorf("~%s/%s was renamed to %s; change it in your remote (git remote -v, then git remote set-url origin ...:%s)",
+				owner, repoName, to.FullName(), to.FullName())
+		}
+	}
 	if err != nil || !repo.CanRead(u) || (write && !repo.CanWrite(u)) {
 		// Same answer for missing, private and read-only repos.
 		audit("denied user=%s service=%s repo=~%s/%s", u.Name, service, owner, repoName)

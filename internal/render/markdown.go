@@ -25,9 +25,17 @@ import (
 // (".../tree/auth.go#L48", which has line anchors) and ![](img.png) to the
 // raw file. With empty bases, links are left alone.
 func Markdown(src []byte, linkBase, imageBase string) (template.HTML, error) {
+	return MarkdownAt(src, linkBase, imageBase, "", "")
+}
+
+// MarkdownAt is Markdown for a file in the folder dir of the repository
+// (a README in a subfolder): relative links are resolved from there, and
+// query (e.g. "h=v1.0", to stay on a branch or tag) is added to links
+// that have none.
+func MarkdownAt(src []byte, linkBase, imageBase, dir, query string) (template.HTML, error) {
 	opts := []parser.Option{parser.WithAutoHeadingID()}
 	if linkBase != "" {
-		opts = append(opts, parser.WithASTTransformers(util.Prioritized(relativeLinks{linkBase, imageBase}, 100)))
+		opts = append(opts, parser.WithASTTransformers(util.Prioritized(relativeLinks{linkBase, imageBase, dir, query}, 100)))
 	}
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM), goldmark.WithParserOptions(opts...))
 	var buf bytes.Buffer
@@ -37,26 +45,27 @@ func Markdown(src []byte, linkBase, imageBase string) (template.HTML, error) {
 	return template.HTML(buf.String()), nil
 }
 
-type relativeLinks struct{ linkBase, imageBase string }
+type relativeLinks struct{ linkBase, imageBase, dir, query string }
 
 func (t relativeLinks) Transform(doc *ast.Document, _ text.Reader, _ parser.Context) {
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
 			switch n := n.(type) {
 			case *ast.Link:
-				n.Destination = rewriteRelative(n.Destination, t.linkBase)
+				n.Destination = rewriteRelative(n.Destination, t.linkBase, t.dir, t.query)
 			case *ast.Image:
-				n.Destination = rewriteRelative(n.Destination, t.imageBase)
+				n.Destination = rewriteRelative(n.Destination, t.imageBase, t.dir, t.query)
 			}
 		}
 		return ast.WalkContinue, nil
 	})
 }
 
-// rewriteRelative prefixes a repository-relative destination with base.
+// rewriteRelative turns a destination relative to the folder dir of the
+// repository into a link under base, adding query if it has none.
 // Absolute URLs, absolute paths, fragments and paths leaving the
 // repository are returned unchanged.
-func rewriteRelative(dest []byte, base string) []byte {
+func rewriteRelative(dest []byte, base, dir, query string) []byte {
 	d := string(dest)
 	if d == "" || strings.HasPrefix(d, "#") || strings.HasPrefix(d, "/") {
 		return dest
@@ -65,13 +74,18 @@ func rewriteRelative(dest []byte, base string) []byte {
 	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" {
 		return dest
 	}
-	p := path.Clean(u.Path)
-	if p == "." || p == ".." || strings.HasPrefix(p, "../") {
+	if u.Path == "" {
+		return dest
+	}
+	p := path.Clean(path.Join(dir, u.Path))
+	if p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") {
 		return dest
 	}
 	out := base + EscapePath(p)
 	if u.RawQuery != "" {
 		out += "?" + u.RawQuery
+	} else if query != "" {
+		out += "?" + query
 	}
 	if u.Fragment != "" {
 		out += "#" + u.EscapedFragment()

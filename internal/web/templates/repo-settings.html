@@ -25,6 +25,15 @@
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button type="submit" class="btn btn-light">Sync now</button>
 </form>{{end}}
+<h3>Rename</h3>
+{{if .RenameError}}<div class="alert">{{.RenameError}}</div>{{end}}
+<form method="post" action="{{$.Repo.Path}}/rename#rename" class="form" id="rename">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="newname">New name</label>
+<input id="newname" name="name" value="{{$.Repo.Name}}" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,99}" spellcheck="false" autocapitalize="none" required>
+<small class="muted">The old address keeps working on the web and for HTTPS clones, and SSH tells people the new one, until a new repository takes the old name. Update your own clones with <code>git remote set-url origin</code>.</small>
+<button type="submit" class="btn btn-light">Rename</button>
+</form>
 <h3 class="danger-title">Delete repository</h3>
 <p>This permanently deletes <b>{{$.Repo.FullName}}</b> and its whole history. It cannot be undone.</p>
 <form method="post" action="{{$.Repo.Path}}/delete" class="form">

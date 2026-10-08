@@ -15,6 +15,7 @@ import (
 
 	"go-git-server/internal/gitrepo"
 	"go-git-server/internal/render"
+	"go-git-server/internal/sshgit"
 )
 
 const (
@@ -89,6 +90,7 @@ func (s *Server) ownedRepo(w http.ResponseWriter, r *http.Request) *gitrepo.Repo
 
 type repoSettingsData struct {
 	Error, Notice string
+	RenameError   string
 	MirrorStatus  *gitrepo.MirrorStatus
 }
 
@@ -108,6 +110,9 @@ func (s *Server) handleRepoSettingsForm(w http.ResponseWriter, r *http.Request, 
 	data := repoSettingsData{}
 	if r.URL.Query().Get("sync") == "1" {
 		data.Notice = "Sync started. Reload this page in a minute to see the result."
+	}
+	if old := r.URL.Query().Get("renamed"); old != "" {
+		data.Notice = "Renamed. Links to ~" + repo.Owner + "/" + old + " lead here now; update your clones: git remote set-url origin " + s.cloneURL(r, repo)
 	}
 	s.repoSettingsPage(w, r, repo, http.StatusOK, data)
 }
@@ -143,6 +148,25 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	log.Printf("repo settings user=%q repo=%s public=%v protected=%q", repo.Owner, repo.FullName(), public, protected)
 	repo, _ = gitrepo.Load(s.reposDir, repo.Owner, repo.Name)
 	s.repoSettingsPage(w, r, repo, http.StatusOK, repoSettingsData{Notice: "Settings saved."})
+}
+
+func (s *Server) handleRepoRename(w http.ResponseWriter, r *http.Request) {
+	repo := s.ownedRepo(w, r)
+	if repo == nil {
+		return
+	}
+	newName := strings.TrimSpace(r.PostFormValue("name"))
+	lock, err := sshgit.LockPush(repo)
+	if err == nil {
+		err = gitrepo.Rename(s.reposDir, repo, newName)
+		lock.Close()
+	}
+	if err != nil {
+		s.repoSettingsPage(w, r, repo, http.StatusBadRequest, repoSettingsData{RenameError: capitalize(err.Error()) + "."})
+		return
+	}
+	log.Printf("repo renamed user=%q repo=%s to=%s", repo.Owner, repo.FullName(), newName)
+	http.Redirect(w, r, "/~"+repo.Owner+"/"+newName+"/settings?renamed="+url.QueryEscape(repo.Name), http.StatusSeeOther)
 }
 
 func (s *Server) handleMirrorSync(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +236,17 @@ func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, err := gitrepo.Load(s.reposDir, owner, r.PathValue("repo"))
+	if err != nil {
+		// A renamed repository: send those who may see it to the new name.
+		if to, ok := gitrepo.Renamed(s.reposDir, owner, r.PathValue("repo")); ok && to.CanRead(currentUser(r)) && r.Method == http.MethodGet {
+			target := to.Path() + "/" + r.PathValue("rest")
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+	}
 	if err != nil || !repo.CanRead(currentUser(r)) {
 		s.notFound(w, r) // private repos are indistinguishable from missing ones
 		return
@@ -276,23 +311,29 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, repo *git
 	data.Default = gitrepo.DefaultBranch(ctx, repo.Dir)
 	if readme, _ := gitrepo.SpecialFilesAt(ctx, repo.Dir, commit); readme != "" {
 		data.ReadmeName = readme
-		if size, err := gitrepo.BlobSize(ctx, repo.Dir, commit, readme); err == nil && size <= maxReadmeSize {
-			if content, err := gitrepo.BlobContent(ctx, repo.Dir, commit, readme); err == nil {
-				ext := strings.ToLower(path.Ext(readme))
-				var html template.HTML
-				var err error
-				if ext == ".md" || ext == ".markdown" {
-					html, err = render.Markdown(content, repo.Path()+"/tree/", repo.Path()+"/raw/")
-				}
-				if html != "" && err == nil {
-					data.ReadmeHTML = html
-				} else {
-					data.ReadmeText = string(content)
-				}
-			}
-		}
+		data.ReadmeHTML, data.ReadmeText = s.readme(ctx, repo, commit, readme, "", "")
 	}
 	s.render(w, http.StatusOK, "summary", s.repoPage(r, repo, "summary", "", data))
+}
+
+// readme renders the README at file in commit, in the folder dir: as HTML
+// if it is Markdown, otherwise as text. Links in it stay on the branch or
+// tag in query. Both are empty if it is too large or unreadable.
+func (s *Server) readme(ctx context.Context, repo *gitrepo.Repo, commit, file, dir, query string) (template.HTML, string) {
+	size, err := gitrepo.BlobSize(ctx, repo.Dir, commit, file)
+	if err != nil || size > maxReadmeSize {
+		return "", ""
+	}
+	content, err := gitrepo.BlobContent(ctx, repo.Dir, commit, file)
+	if err != nil {
+		return "", ""
+	}
+	if ext := strings.ToLower(path.Ext(file)); ext == ".md" || ext == ".markdown" {
+		if html, err := render.MarkdownAt(content, repo.Path()+"/tree/", repo.Path()+"/raw/", dir, query); err == nil && html != "" {
+			return html, ""
+		}
+	}
+	return "", string(content)
 }
 
 type logData struct {
@@ -356,6 +397,10 @@ type treeData struct {
 	Crumbs  []crumb
 	Last    *gitrepo.Commit
 	Entries []treeEntry
+	// The folder's README, shown below its files.
+	ReadmeName string
+	ReadmeHTML template.HTML
+	ReadmeText string
 	// Blob view
 	IsBlob   bool
 	Name     string
@@ -480,11 +525,21 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, repo *gitrep
 			if p != "" {
 				full = p + "/" + e.Name
 			}
+			if e.Type == "blob" && data.ReadmeName == "" && gitrepo.IsReadme(e.Name) {
+				data.ReadmeName = full
+			}
 			te := treeEntry{Mode: fileMode(e.Mode), Name: e.Name, Size: e.Size, IsDir: e.Type == "tree", IsFile: e.Type == "blob"}
 			if e.Type != "commit" { // submodules have nothing to show
 				te.Href = base + render.EscapePath(full) + q
 			}
 			data.Entries = append(data.Entries, te)
+		}
+		if data.ReadmeName != "" {
+			query := ""
+			if ref != "" {
+				query = url.Values{"h": {ref}}.Encode()
+			}
+			data.ReadmeHTML, data.ReadmeText = s.readme(ctx, repo, commit, data.ReadmeName, p, query)
 		}
 	case "blob":
 		data.IsBlob = true
