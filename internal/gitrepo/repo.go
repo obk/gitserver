@@ -29,6 +29,7 @@ type Repo struct {
 	Dir         string
 	Description string
 	Public      bool
+	Protected   []string // branch patterns, see protect.go
 	Updated     time.Time
 }
 
@@ -65,6 +66,7 @@ func Load(reposDir, owner, name string) (*Repo, error) {
 	}
 	_, err := os.Stat(filepath.Join(dir, publicMarker))
 	r.Public = err == nil
+	r.Protected = Protected(dir)
 	return r, nil
 }
 

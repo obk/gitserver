@@ -17,6 +17,8 @@ git push -u origin main</pre>
 {{template "clone" $}}
 <h4>Refs</h4>
 <p><a href="{{$.Repo.Path}}/refs">{{.Branches}} {{if eq .Branches 1}}branch{{else}}branches{{end}}, {{.Tags}} {{if eq .Tags 1}}tag{{else}}tags{{end}}</a></p>
+{{with .Default}}<h4>Download</h4>
+<p><a href="{{$.Repo.Path}}/archive/{{.}}.tar.gz">tar.gz</a> &middot; <a href="{{$.Repo.Path}}/archive/{{.}}.zip">zip</a> <small class="muted">of {{.}}; other branches and tags under <a href="{{$.Repo.Path}}/refs">refs</a></small></p>{{end}}
 </aside>
 </div>
 {{if .ReadmeHTML}}<article class="readme markdown">{{.ReadmeHTML}}</article>

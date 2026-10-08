@@ -1,14 +1,23 @@
 package web
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"encoding/xml"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"go-git-server/internal/gitrepo"
 )
 
 // pushHistory pushes a small history to ~owner/repo:
@@ -247,5 +256,151 @@ func TestCompare(t *testing.T) {
 	}
 	if code, _ := e.get(anon, "/~alice/secret/compare?from=main&to=feature"); code != http.StatusNotFound {
 		t.Fatalf("compared in a private repository: %d", code)
+	}
+}
+
+func TestProtectedBranches(t *testing.T) {
+	e := newTestEnv(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp) // where pushes put their hook folder
+	e.pushHistory("alice", "pub")
+	dir := filepath.Join(e.work, "alice-pub-hist") // on branch feature
+	repoDir := gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "pub")
+	remote := "git@git.test:~alice/pub"
+	git := func(args ...string) (string, error) { return e.git("alice", dir, args...) }
+	must := func(args ...string) string {
+		t.Helper()
+		out, err := git(args...)
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	serverRef := func(ref string) string {
+		out, _ := exec.Command("git", "--git-dir="+repoDir, "rev-parse", "--verify", "-q", ref).Output()
+		return strings.TrimSpace(string(out))
+	}
+	// A hook in the repository folder must never run.
+	os.WriteFile(filepath.Join(repoDir, "hooks", "pre-receive"), []byte("#!/bin/sh\necho REPO HOOK RAN >&2\nexit 1\n"), 0o755)
+
+	// Protect main and release/* in the settings.
+	alice := e.login("alice")
+	_, body := e.get(alice, "/~alice/pub/settings")
+	csrf := csrfToken(t, body)
+	settings := func(protected string) (int, string) {
+		return e.post(alice, "/~alice/pub/settings", url.Values{"csrf": {csrf}, "description": {"d"}, "visibility": {"public"}, "protected": {protected}}, "")
+	}
+	if code, body := settings("main ../x"); code != http.StatusBadRequest || !strings.Contains(body, "not a branch name") {
+		t.Fatalf("bad pattern accepted: %d", code)
+	}
+	if code, body := settings("main, refs/heads/release/* main"); code != 200 || !strings.Contains(body, `value="main release/*"`) {
+		t.Fatalf("protecting: %d\n%s", code, body)
+	}
+
+	mainBefore := serverRef("refs/heads/main")
+	// Force-pushing main is refused, and nothing changes.
+	out, err := git("push", "-f", remote, "feature~2:main") // main is feature~1; this drops "second"
+	if err == nil || !strings.Contains(out, "main is protected: this push would remove commits") || strings.Contains(out, "REPO HOOK") {
+		t.Fatalf("force push to a protected branch: %v\n%s", err, out)
+	}
+	// Deleting it too, even together with an allowed change.
+	out, err = git("push", remote, ":main", "feature:refs/heads/other")
+	if err == nil || !strings.Contains(out, "main is protected and can't be deleted") {
+		t.Fatalf("delete of a protected branch: %v\n%s", err, out)
+	}
+	if serverRef("refs/heads/main") != mainBefore || serverRef("refs/heads/other") != "" {
+		t.Fatal("a refused push changed refs")
+	}
+	// Moving it forward works, and so does creating and deleting others.
+	must("push", remote, "feature:main")
+	if serverRef("refs/heads/main") != serverRef("refs/heads/feature") {
+		t.Fatal("fast-forward of a protected branch refused")
+	}
+	must("push", remote, "feature~1:refs/heads/release/1.0", "feature~1:refs/heads/scratch")
+	must("push", "-f", remote, "feature~2:scratch")
+	must("push", remote, ":scratch")
+	if out, err := git("push", "-f", remote, "feature~2:release/1.0"); err == nil || !strings.Contains(out, "release/1.0 is protected") {
+		t.Fatalf("pattern release/* not enforced: %v\n%s", err, out)
+	}
+	// Lifting the protection allows it again.
+	settings("")
+	if _, err := os.Stat(filepath.Join(repoDir, "gitserver-protected-branches")); err == nil {
+		t.Fatal("protection file left after clearing")
+	}
+	must("push", "-f", remote, "feature~2:main")
+	if left, _ := filepath.Glob(filepath.Join(tmp, "gitserver-hooks-*")); len(left) != 0 {
+		t.Fatalf("hook folders left behind: %v", left)
+	}
+}
+
+func TestArchive(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushHistory("alice", "pub")
+	e.pushHistory("alice", "secret")
+	anon := &http.Client{}
+	fetch := func(c *http.Client, path string) (*http.Response, []byte) {
+		t.Helper()
+		resp, err := c.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, b
+	}
+
+	resp, b := fetch(anon, "/~alice/pub/archive/feature.tar.gz")
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/gzip" ||
+		resp.Header.Get("Content-Disposition") != `attachment; filename=pub-feature.tar.gz` {
+		t.Fatalf("tar.gz: %d %v", resp.StatusCode, resp.Header)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	tr := tar.NewReader(zr)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		names = append(names, h.Name)
+	}
+	if !slices.Contains(names, "pub-feature/feature.txt") || !slices.Contains(names, "pub-feature/src/app.go") {
+		t.Fatalf("tar.gz contents: %v", names)
+	}
+
+	resp, b = fetch(anon, "/~alice/pub/archive/refs/tags/v1.zip")
+	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Disposition"), "pub-v1.zip") {
+		t.Fatalf("zip: %d %v", resp.StatusCode, resp.Header)
+	}
+	zipr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names = nil
+	for _, f := range zipr.File {
+		names = append(names, f.Name)
+	}
+	if !slices.Contains(names, "pub-v1/notes.txt") || slices.Contains(names, "pub-v1/feature.txt") {
+		t.Fatalf("zip of v1 (before feature.txt): %v", names)
+	}
+
+	for _, p := range []string{"/~alice/pub/archive/nope.zip", "/~alice/pub/archive/main.rar", "/~alice/pub/archive/.zip",
+		"/~alice/pub/archive/--output=x.zip", "/~alice/secret/archive/main.zip"} {
+		if code, _ := e.get(anon, p); code != http.StatusNotFound {
+			t.Errorf("%s: %d", p, code)
+		}
+	}
+	if resp, _ := fetch(e.login("alice"), "/~alice/secret/archive/main.zip"); resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("owner's private archive: %d %v", resp.StatusCode, resp.Header)
+	}
+	if _, body := e.get(anon, "/~alice/pub/refs"); !strings.Contains(body, `href="/~alice/pub/archive/main.tar.gz"`) ||
+		!strings.Contains(body, `href="/~alice/pub/archive/refs/tags/v1.zip"`) {
+		t.Fatal("refs page has no archive links")
+	}
+	if _, body := e.get(anon, "/~alice/pub/"); !strings.Contains(body, `href="/~alice/pub/archive/main.zip"`) {
+		t.Fatal("summary has no download link")
 	}
 }

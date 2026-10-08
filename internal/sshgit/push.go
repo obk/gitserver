@@ -46,10 +46,16 @@ func receivePack(gitPath string, argv, env []string, repo *gitrepo.Repo, audit f
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(gitPath, argv[1:]...)
+	hooks, err := hookDir()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(gitPath, append([]string{"-c", "core.hooksPath=" + hooks}, argv[1:]...)...)
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	os.RemoveAll(hooks)
+	if err != nil {
 		// git has told the client what went wrong; just pass on its status.
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {

@@ -20,6 +20,7 @@ var templateFuncs = template.FuncMap{
 	"ago":      timeAgo,
 	"short":    func(h string) string { return h[:min(len(h), 8)] },
 	"inc":      func(i int) int { return i + 1 },
+	"join":     strings.Join,
 	"size":     humanSize,
 	"ev":       func(repo string, c gitrepo.Commit) eventData { return eventData{repo, c} },
 }

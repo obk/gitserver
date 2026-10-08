@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,10 @@ Flags must come before positional arguments.
 `
 
 func main() {
+	if filepath.Base(os.Args[0]) == sshgit.HookName {
+		preReceiveHook()
+		return
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -654,4 +659,24 @@ func cmdUpdate(args []string) error {
 		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see the README's Updating section")
 	}
 	return syscall.Exec(gitserverctl, append([]string{gitserverctl, "update"}, args...), os.Environ())
+}
+
+// preReceiveHook runs when git starts this program as the pre-receive hook
+// of a push (see sshgit.hookDir). Its output goes to the pusher; failing
+// refuses the push.
+func preReceiveHook() {
+	dir, err := sshgit.HookRepoDir()
+	var gitPath string
+	if err == nil {
+		gitPath, err = exec.LookPath("git")
+	}
+	if err == nil {
+		err = sshgit.PreReceive(gitPath, dir, os.Stdin, os.Stderr)
+	}
+	if err != nil {
+		if !errors.Is(err, sshgit.ErrProtected) {
+			fmt.Fprintln(os.Stderr, "gitserver: checking protected branches failed:", err)
+		}
+		os.Exit(1)
+	}
 }
