@@ -7,7 +7,7 @@ import (
 
 // Fuzz tests for functions that check attacker-controlled input. Each one
 // states what an accepted value must never contain. `go test` runs the seed
-// corpus; `go test -fuzz FuzzName` searches for more (see README).
+// corpus; `go test -fuzz FuzzName` searches for more (see WIKI.md).
 
 func FuzzValidRev(f *testing.F) {
 	for _, s := range []string{"main", "refs/heads/main", "v1.0", "--output=x", "HEAD:secret", "a..b", "HEAD^{tree}", "x y", "abcd"} {

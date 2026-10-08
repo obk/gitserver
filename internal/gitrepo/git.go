@@ -271,6 +271,9 @@ func BlobContent(ctx context.Context, dir, commit, path string) ([]byte, error) 
 	return gitOutput(ctx, dir, "cat-file", "blob", commit+":"+path)
 }
 
+// IsReadme reports whether a file name is a README (README, README.md, ...).
+func IsReadme(name string) bool { return specialFiles[strings.ToLower(name)] == "readme" }
+
 // SpecialFilesAt finds README and LICENSE in the root tree of commit.
 func SpecialFilesAt(ctx context.Context, dir, commit string) (readme, license string) {
 	out, err := gitOutput(ctx, dir, "ls-tree", "-z", "--name-only", "--end-of-options", commit)

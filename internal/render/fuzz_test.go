@@ -9,17 +9,19 @@ import (
 
 // Fuzz tests for functions that check attacker-controlled input. Each one
 // states what an accepted value must never contain. `go test` runs the seed
-// corpus; `go test -fuzz FuzzName` searches for more (see README).
+// corpus; `go test -fuzz FuzzName` searches for more (see WIKI.md).
 
-// README links rewritten into the repository must stay inside it.
+// README links rewritten into the repository must stay inside it, also
+// from a README in a subfolder.
 func FuzzRewriteRelative(f *testing.F) {
-	for _, s := range []string{"docs/a.md", "../x", "a/../../b", "https://evil.com", "//evil.com", "#top", "a.png?raw=1#x", "./a", "a%2F..%2F..%2Fb"} {
-		f.Add(s)
+	for _, s := range []string{"docs/a.md", "../x", "a/../../b", "https://evil.com", "//evil.com", "#top", "a.png?raw=1#x", "./a", "a%2F..%2F..%2Fb", "../../../x"} {
+		f.Add(s, "")
+		f.Add(s, "sub/dir")
 	}
 	const linkBase = "/~a/r/tree/"
 	repoBase, _ := url.Parse("https://git.example.com/~a/r/")
-	f.Fuzz(func(t *testing.T, dest string) {
-		out := string(rewriteRelative([]byte(dest), linkBase))
+	f.Fuzz(func(t *testing.T, dest, dir string) {
+		out := string(rewriteRelative([]byte(dest), linkBase, dir, "h=v1"))
 		if out == dest {
 			return // left alone: absolute, fragment or outside the repository
 		}

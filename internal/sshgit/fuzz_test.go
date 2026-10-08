@@ -9,7 +9,7 @@ import (
 
 // Fuzz tests for functions that check attacker-controlled input. Each one
 // states what an accepted value must never contain. `go test` runs the seed
-// corpus; `go test -fuzz FuzzName` searches for more (see README).
+// corpus; `go test -fuzz FuzzName` searches for more (see WIKI.md).
 
 func FuzzParseSSHCommand(f *testing.F) {
 	for _, s := range []string{"git-upload-pack '~obk/x.git'", "git-receive-pack '/~a/b/'", "git-upload-archive '~a/b'",

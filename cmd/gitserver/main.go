@@ -49,6 +49,7 @@ Usage:
   gitserver invite list | invite revoke ID
   gitserver repo create [-public] [-desc TEXT] ~OWNER/NAME
   gitserver repo public ~OWNER/NAME | repo private ~OWNER/NAME
+  gitserver repo rename ~OWNER/NAME NEWNAME            the old name keeps leading to it
   gitserver repo list
   gitserver ssh-keys USER TYPE KEY                    sshd AuthorizedKeysCommand (see deploy/)
   gitserver ssh-serve USER                            forced command for SSH keys
@@ -515,6 +516,28 @@ func cmdRepo(args []string) error {
 			}
 			fmt.Printf("%-40s %-7s %s\n", r.FullName(), vis, r.Description)
 		}
+		return nil
+	case "rename":
+		if fs.NArg() != 2 {
+			return errUsage
+		}
+		owner, name, err := gitrepo.ParseRef(fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		repo, err := gitrepo.Load(reposDir, owner, name)
+		if err != nil {
+			return fmt.Errorf("no repository ~%s/%s", owner, name)
+		}
+		lock, err := sshgit.LockPush(repo)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if err := gitrepo.Rename(reposDir, repo, fs.Arg(1)); err != nil {
+			return err
+		}
+		fmt.Printf("Renamed ~%s/%s to ~%s/%s\n", owner, name, owner, fs.Arg(1))
 		return nil
 	case "create", "public", "private":
 	default:

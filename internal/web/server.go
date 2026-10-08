@@ -173,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{owner}/{repo}/{rest...}", s.handleRepo)
 	mux.HandleFunc("POST /{owner}/{repo}/settings", s.requireUser(s.handleRepoSettings))
 	mux.HandleFunc("POST /{owner}/{repo}/delete", s.requireUser(s.handleRepoDelete))
+	mux.HandleFunc("POST /{owner}/{repo}/rename", s.requireUser(s.handleRepoRename))
 	mux.HandleFunc("POST /{owner}/{repo}/mirror/sync", s.requireUser(s.handleMirrorSync))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { s.notFound(w, r) })
 
