@@ -11,11 +11,43 @@ import (
 // doesn't have, and the diff between them from where they forked.
 
 type compareData struct {
-	From, To string
-	Refs     []string // branch and tag names, for the form
-	Error    string
-	Same     bool
+	From, To         string
+	FromOpts, ToOpts []refGroup // the form's drop-down lists
+	Error            string
+	Same             bool
 	*gitrepo.Comparison
+}
+
+// refGroup is a group of a drop-down list of refs: branches, tags, or the
+// commit given in the address.
+type refGroup struct {
+	Label   string
+	Options []refOption
+}
+
+type refOption struct {
+	Name     string
+	Selected bool
+}
+
+// refOptions lists branches and tags with selected marked. A selected
+// value that is neither (a commit hash from a link) gets its own group, so
+// the form keeps it.
+func refOptions(branches, tags []string, selected string) []refGroup {
+	found := false
+	group := func(label string, names []string) refGroup {
+		g := refGroup{Label: label}
+		for _, n := range names {
+			g.Options = append(g.Options, refOption{n, n == selected})
+			found = found || n == selected
+		}
+		return g
+	}
+	groups := []refGroup{group("Branches", branches), group("Tags", tags)}
+	if !found && selected != "" {
+		groups = append(groups, refGroup{"Commit", []refOption{{selected, true}}})
+	}
+	return groups
 }
 
 func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request, repo *gitrepo.Repo) {
@@ -27,15 +59,29 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request, repo *git
 		s.error(w, r, http.StatusInternalServerError, "Could not read refs.")
 		return
 	}
+	var branchNames, tagNames []string
 	for _, b := range branches {
-		data.Refs = append(data.Refs, b.Name)
+		branchNames = append(branchNames, b.Name)
 	}
 	for _, t := range tags {
-		data.Refs = append(data.Refs, t.Name)
+		tagNames = append(tagNames, t.Name)
 	}
 	if data.From == "" {
 		data.From = gitrepo.DefaultBranch(ctx, repo.Dir)
 	}
+	// Before anything is picked, "to" starts at another branch (or tag),
+	// so Compare shows something right away.
+	toPick := data.To
+	if toPick == "" {
+		for _, n := range append(append([]string{}, branchNames...), tagNames...) {
+			if n != data.From {
+				toPick = n
+				break
+			}
+		}
+	}
+	data.FromOpts = refOptions(branchNames, tagNames, data.From)
+	data.ToOpts = refOptions(branchNames, tagNames, toPick)
 	page := func(status int) {
 		s.render(w, status, "compare", s.repoPage(r, repo, "refs", "Compare", data))
 	}

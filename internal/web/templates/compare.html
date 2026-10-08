@@ -1,7 +1,6 @@
 {{define "content"}}{{with .Data}}<form method="get" action="{{$.Repo.Path}}/compare" class="search-form">
-<label for="from">From</label><input id="from" name="from" value="{{.From}}" list="refs" maxlength="256" required>
-<label for="to">to</label><input id="to" name="to" value="{{.To}}" list="refs" maxlength="256" required>
-<datalist id="refs">{{range .Refs}}<option value="{{.}}">{{end}}</datalist>
+<label for="from">From</label>{{template "refselect" (refsel "from" .FromOpts)}}
+<label for="to">to</label>{{template "refselect" (refsel "to" .ToOpts)}}
 <button type="submit" class="btn">Compare</button>
 </form>
 {{if .Error}}<div class="alert">{{.Error}}</div>
@@ -16,3 +15,4 @@
 {{else}}<div class="notice">No changes to files.</div>{{end}}
 {{else}}<p class="muted">Pick two branches, tags or commits. The page shows the commits on the second that the first doesn't have, and what they changed, like a pull request.</p>{{end}}
 {{end}}{{end}}
+{{define "refselect"}}<select id="{{.Name}}" name="{{.Name}}">{{range .Groups}}{{if .Options}}<optgroup label="{{.Label}}">{{range .Options}}<option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}</optgroup>{{end}}{{end}}</select>{{end}}

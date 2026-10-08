@@ -244,8 +244,29 @@ func TestCompare(t *testing.T) {
 		t.Fatal("same commit not noticed")
 	}
 	// Without from, the default branch is preselected.
-	if _, body := e.get(anon, "/~alice/pub/compare"); !strings.Contains(body, `name="from" value="main"`) || !strings.Contains(body, `<option value="v1">`) {
-		t.Fatalf("empty compare form:\n%s", body)
+	// The form has drop-downs: branches and tags, the default branch as
+	// "from" and another branch as "to".
+	_, body = e.get(anon, "/~alice/pub/compare")
+	for _, want := range []string{
+		`<select id="from" name="from"><optgroup label="Branches">`,
+		`<optgroup label="Tags"><option value="v1">v1</option></optgroup>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("compare form lacks %s:\n%s", want, body)
+		}
+	}
+	from := body[strings.Index(body, `id="from"`):strings.Index(body, `id="to"`)]
+	to := body[strings.Index(body, `id="to"`):]
+	if !strings.Contains(from, `<option value="main" selected>`) || !strings.Contains(to, `<option value="feature" selected>`) {
+		t.Fatalf("preselected refs:\n%s", body)
+	}
+	// A commit hash from a link stays selected.
+	main := strings.TrimSpace(func() string {
+		out, _ := exec.Command("git", "--git-dir="+gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "pub"), "rev-parse", "main").Output()
+		return string(out)
+	}())
+	if _, body := e.get(anon, "/~alice/pub/compare?from="+main+"&to=feature"); !strings.Contains(body, `<optgroup label="Commit"><option value="`+main+`" selected>`) {
+		t.Fatalf("hash not kept in the form:\n%s", body)
 	}
 	for _, q := range []string{"from=main&to=nope", "from=main..feature&to=main", "from=--all&to=main"} {
 		if code, _ := e.get(anon, "/~alice/pub/compare?"+q); code != http.StatusNotFound {

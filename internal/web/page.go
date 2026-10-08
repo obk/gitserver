@@ -21,6 +21,7 @@ var templateFuncs = template.FuncMap{
 	"short":    func(h string) string { return h[:min(len(h), 8)] },
 	"inc":      func(i int) int { return i + 1 },
 	"join":     strings.Join,
+	"refsel":   func(name string, groups []refGroup) refSelect { return refSelect{name, groups} },
 	"size":     humanSize,
 	"ev":       func(repo string, c gitrepo.Commit) eventData { return eventData{repo, c} },
 }
@@ -128,6 +129,12 @@ func fileMode(mode string) string {
 	default:
 		return "-rw-r--r--"
 	}
+}
+
+// refSelect is a named drop-down list of refs (compare.html).
+type refSelect struct {
+	Name   string
+	Groups []refGroup
 }
 
 func humanSize(n int64) string {

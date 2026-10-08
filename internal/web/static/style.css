@@ -195,7 +195,7 @@ table.tree .size { text-align: right; color: var(--muted); white-space: nowrap; 
 .code .lines > span.sel, .code .lines > span:target { background: var(--hl); }
 .code .lines > span:target { scroll-margin-top: 4rem; }
 .search-form { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; }
-.search-form input:not([type=checkbox]) { flex: 1 1 12rem; width: auto; }
+.search-form input:not([type=checkbox]), .search-form select { flex: 1 1 12rem; width: auto; min-width: 0; }
 .search-form input[type=search] { flex-basis: 20rem; }
 h3 small { font-size: .8rem; font-weight: 400; margin-left: .5rem; }
 .search-form .check { margin: 0; }
