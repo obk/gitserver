@@ -107,7 +107,23 @@ The 2FA encryption key is created at `./data/secret.key` the first time.
 
 ## Installing on a VPS
 
-### Option A: from your computer with `make deploy`
+### Option A: download a release (recommended)
+
+Every release on GitHub has a ready-made bundle; nothing needs to be built. On the server, as root:
+
+```sh
+case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+cd /tmp
+wget -N https://github.com/obk/gitserver/releases/latest/download/gitserver-linux-$ARCH.tar.gz \
+        https://github.com/obk/gitserver/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS    # must say OK
+rm -rf bundle && tar -xzf gitserver-linux-$ARCH.tar.gz
+DOMAIN=git.example.com sh bundle/deploy/install.sh
+```
+
+Use `sudo` before `sh` if you're not root. For a specific version, replace `latest/download` with `download/0.0.1` (the version tag). Without `wget`, use `curl -fLO URL` for each file.
+
+### Option B: from your computer with `make deploy`
 
 ```sh
 ssh root@git.example.com      # once, to accept the server's host key; then exit
@@ -116,7 +132,7 @@ make deploy HOST=root@git.example.com DOMAIN=git.example.com
 
 This builds the Linux binary, copies a bundle to the server, and runs the installer there. If your computer has never connected to the server before, `make deploy` stops and tells you to run the `ssh` command above first. Otherwise SSH would silently wait for you to confirm the host key. For an ARM server, add `ARCH=arm64`.
 
-### Option B: by hand
+### Option C: build the bundle yourself
 
 ```sh
 make bundle                                               # creates dist/gitserver-<version>-linux-amd64.tar.gz
@@ -171,11 +187,21 @@ Then open `https://git.example.com`, log in, create a repository, and push.
 
 ## Updating
 
+Download the newest release and run the installer again, the same commands as in [Option A](#option-a-download-a-release-recommended) without `DOMAIN=…`:
+
 ```sh
-make update HOST=root@git.example.com
+case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+cd /tmp
+wget -N https://github.com/obk/gitserver/releases/latest/download/gitserver-linux-$ARCH.tar.gz \
+        https://github.com/obk/gitserver/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+rm -rf bundle && tar -xzf gitserver-linux-$ARCH.tar.gz
+sh bundle/deploy/install.sh
 ```
 
-`make update` (or `make deploy` with the same domain, or re-running `install.sh`) runs as a **quick update** when gitserver is already installed:
+Or from your computer: `make update HOST=root@git.example.com`.
+
+Re-running `install.sh` (or `make update`) runs as a **quick update** when gitserver is already installed:
 
 - **no questions:** domain, site name and email are read from the existing setup
 - **no package installs**, unless something is missing
@@ -583,6 +609,16 @@ make bundle       # deploy bundle for ARCH (default amd64)
 Tests sit next to the code they test. The tests in `internal/web` run a full server with real git, including the SSH key lookup and forced command (they build the binary first).
 
 The input checks that face attackers (SSH command, revisions, tree paths, login redirects, README links) have fuzz tests in each package's `fuzz_test.go`. `make test` runs their seed inputs; to search for new failures, run one for a while, e.g. `go test -run '^$' -fuzz '^FuzzSafeNext$' -fuzztime 5m ./internal/web`. A failing input is saved under that package's `testdata/fuzz/` and then runs with every `make test`.
+
+**Releases.** Push a version tag and GitHub Actions (`.github/workflows/release.yml`) runs the tests, builds the amd64 and arm64 bundles and publishes them as a GitHub Release with `SHA256SUMS`:
+
+```sh
+git tag 0.0.2 && git push origin 0.0.2
+```
+
+Or on GitHub: **Actions → release → Run workflow**, enter the version (e.g. `0.0.2`); this tags the latest commit of the branch you pick (normally `main`).
+
+The bundle names don't contain the version, so the `latest/download` links in [Option A](#option-a-download-a-release-recommended) always get the newest release.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs gofmt, `make test` and [govulncheck](https://go.dev/doc/security/vuln/) on every push and pull request. Once a week it also fuzzes every target for 5 minutes and checks for newly published vulnerabilities.
 
