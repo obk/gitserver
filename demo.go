@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,13 +22,29 @@ const (
 	demoPassword = "demo-password"
 )
 
+// loopbackAddr reports whether addr (host:port) only accepts local connections.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // cmdDemo runs a throwaway server on localhost with sample repositories and
 // a ready-made admin account. Current TOTP codes are printed to the terminal
 // so no authenticator app is needed. Everything is deleted on exit.
 func cmdDemo(args []string) error {
 	fs, _ := newFlagSet("demo")
-	listen := fs.String("listen", "127.0.0.1:8080", "listen address (keep it on localhost)")
+	listen := fs.String("listen", "127.0.0.1:8080", "listen address (loopback only)")
 	fs.Parse(args)
+	if !loopbackAddr(*listen) {
+		return fmt.Errorf("-listen %q: the demo has an admin account with a published password, so it only listens on loopback addresses such as 127.0.0.1:8080", *listen)
+	}
 
 	dir, err := os.MkdirTemp("", "gitserver-demo-")
 	if err != nil {

@@ -161,7 +161,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "Usernames are 1-32 characters: lowercase letters, digits, - and _, starting with a letter or digit.")
 		return
 	}
-	if _, err := s.store.Get(name); err == nil {
+	if _, err := s.store.Get(name); err == nil || ownerDirExists(s.reposDir, name) {
 		fail(http.StatusBadRequest, "That username is taken.")
 		return
 	}
@@ -179,6 +179,10 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, err := hashPassword(pw)
+	if errors.Is(err, errHashBusy) {
+		fail(http.StatusServiceUnavailable, capitalize(err.Error())+".")
+		return
+	}
 	if err != nil {
 		fail(http.StatusInternalServerError, "Internal error.")
 		return
@@ -221,6 +225,11 @@ func (s *Server) handleSignupConfirm(w http.ResponseWriter, r *http.Request) {
 		s.renderTOTPStep(w, r, http.StatusBadRequest, token, ps, "That code is not valid. Check that your device's clock is correct.")
 		return
 	}
+	if ownerDirExists(s.reposDir, ps.user) {
+		s.pending.delete(token)
+		s.error(w, r, http.StatusConflict, "That username was taken in the meantime. Open the invite link again.")
+		return
+	}
 	u := &User{Name: ps.user, PasswordHash: ps.pwHash, TOTPSecret: s.box.sealTOTP(ps.user, ps.secret), TOTPLast: step, SSHKeys: []SSHKey{ps.key}}
 	if err := s.store.RedeemInvite(ps.inviteHash, u); err != nil {
 		s.pending.delete(token)
@@ -236,7 +245,7 @@ func (s *Server) handleSignupConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pending.delete(token)
 	log.Printf("signup user=%q invited_by=%q ip=%s", u.Name, u.InvitedBy, ip)
-	s.startSession(w, r, u)
+	s.startSession(w, r, u, "")
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -340,6 +349,8 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	var data passwordData
 	if r.URL.Query().Get("changed") == "1" {
 		data.Notice = "Password changed. All other sessions were logged out."
+	} else if sess := currentSession(r); sess != nil && sess.notice != "" {
+		data.Error = sess.notice
 	}
 	s.passwordPage(w, r, http.StatusOK, data)
 }
@@ -351,7 +362,12 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		s.passwordPage(w, r, http.StatusTooManyRequests, passwordData{Error: "Too many failed attempts. Try again later."})
 		return
 	}
-	if u, _ := s.authenticate(name, r.PostFormValue("current"), r.PostFormValue("totp")); u == nil {
+	u, _, err := s.authenticate(name, r.PostFormValue("current"), r.PostFormValue("totp"))
+	if errors.Is(err, errHashBusy) {
+		s.passwordPage(w, r, http.StatusServiceUnavailable, passwordData{Error: capitalize(err.Error()) + "."})
+		return
+	}
+	if u == nil {
 		s.limiter.fail(userKey)
 		s.passwordPage(w, r, http.StatusUnauthorized, passwordData{Error: "Current password or code is wrong."})
 		return
@@ -361,6 +377,10 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, err := hashPassword(r.PostFormValue("password"))
+	if errors.Is(err, errHashBusy) {
+		s.passwordPage(w, r, http.StatusServiceUnavailable, passwordData{Error: capitalize(err.Error()) + "."})
+		return
+	}
 	if err == nil {
 		err = s.store.Update(name, func(u *User) error { u.PasswordHash = hash; return nil })
 	}
@@ -372,7 +392,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// one for this browser.
 	s.sessions.deleteUserExcept(name, "")
 	if u, err := s.store.Get(name); err == nil {
-		s.startSession(w, r, u)
+		s.startSession(w, r, u, "")
 	}
 	log.Printf("password changed user=%q", name)
 	http.Redirect(w, r, "/settings/password?changed=1", http.StatusSeeOther)

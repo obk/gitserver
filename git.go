@@ -132,7 +132,23 @@ func resolveCommit(ctx context.Context, dir, rev string) (string, error) {
 	if err != nil {
 		return "", errNotFound
 	}
-	return strings.TrimSpace(string(out)), nil
+	hash := strings.TrimSpace(string(out))
+	if !reachable(ctx, dir, hash) {
+		return "", errNotFound
+	}
+	return hash, nil
+}
+
+// reachable reports whether commit is on a branch or tag. Commits left
+// behind by a force push or a deleted branch stay in the repository until
+// git gc prunes them, and may hold what the owner meant to remove.
+func reachable(ctx context.Context, dir, commit string) bool {
+	if !hashRe.MatchString(commit) {
+		return false
+	}
+	// Prints commit unless it is reachable from refs/heads or refs/tags.
+	out, err := gitOutput(ctx, dir, "rev-list", "-n", "1", commit, "--not", "--branches", "--tags", "--")
+	return err == nil && len(bytes.TrimSpace(out)) == 0
 }
 
 func lastChange(ctx context.Context, dir string) time.Time {

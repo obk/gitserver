@@ -122,6 +122,9 @@ func cmdServe(args []string) error {
 	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
 		return errors.New("-tls-cert and -tls-key must be given together")
 	}
+	if cfg.BaseURL == "" && !cfg.Insecure {
+		log.Print("warning: no -base-url; invite links and HTTPS clone URLs will use the Host header of each request")
+	}
 	if cfg.TLSCert == "" && !cfg.TrustProxy && !cfg.Insecure {
 		log.Print("warning: no TLS and no -trust-proxy; session cookies are Secure-only, so login needs HTTPS in front of this server")
 	}
@@ -218,6 +221,9 @@ func cmdUser(args []string) error {
 		}
 		if _, err := store.Get(name); err == nil {
 			return errUserExists
+		}
+		if dir := filepath.Join(*data, "repos", name); ownerDirExists(filepath.Join(*data, "repos"), name) {
+			fmt.Fprintf(os.Stderr, "warning: %s exists; the new user %s will own every repository in it.\n", dir, name)
 		}
 		keyText := *sshKey
 		if keyText == "" {

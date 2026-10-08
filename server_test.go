@@ -711,10 +711,12 @@ func TestPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !checkPassword(h, "correct horse battery") {
-		t.Fatal("correct password rejected")
+	if ok, err := checkPassword(h, "correct horse battery"); !ok || err != nil {
+		t.Fatalf("correct password rejected: %v", err)
 	}
-	if checkPassword(h, "wrong") || checkPassword("garbage", "x") {
+	ok1, _ := checkPassword(h, "wrong")
+	ok2, _ := checkPassword("garbage", "x")
+	if ok1 || ok2 {
 		t.Fatal("wrong password accepted")
 	}
 }
@@ -802,5 +804,143 @@ func TestGitHTTPSClone(t *testing.T) {
 	alice := e.login("alice")
 	if _, body := e.get(alice, "/~alice/secret/"); strings.Contains(body, "HTTPS <span") {
 		t.Fatal("HTTPS clone URL shown for a private repo")
+	}
+}
+
+// A name whose repositories are still on disk (its account was deleted)
+// cannot be taken by a new account, which would inherit them.
+func TestDeletedUserNameNotReused(t *testing.T) {
+	e := newTestEnv(t)
+	if err := e.s.store.Delete("bob"); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ := e.s.store.CreateInvite("alice", false, time.Hour)
+	form := url.Values{"code": {code}, "username": {"bob"}, "password": {"bob-password-456"},
+		"password2": {"bob-password-456"}, "key": {newTestKey(t)}}
+	if status, body := e.post(&http.Client{}, "/signup", form, ""); status == 200 || !strings.Contains(body, "taken") {
+		t.Fatalf("signup as deleted bob (whose repos remain): %d", status)
+	}
+}
+
+// Commits that no branch or tag reaches any more (a force-pushed secret)
+// are not served on the web or over git.
+func TestUnreachableCommits(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+	dir := filepath.Join(e.work, "alice-pub-src")
+	run := func(args ...string) string {
+		out, err := e.git("alice", dir, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("hunter2\n"), 0o644)
+	run("add", "secret.txt")
+	run("commit", "-q", "-m", "oops")
+	run("push", "-q", "git@git.test:~alice/pub", "main")
+	leak := run("rev-parse", "HEAD")
+	run("reset", "-q", "--hard", "HEAD~1")
+	run("push", "-q", "-f", "git@git.test:~alice/pub", "main")
+	good := run("rev-parse", "HEAD")
+
+	anon := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, p := range []string{"/commit/" + leak, "/commit/" + leak[:4], "/tree?h=" + leak, "/tree/secret.txt?h=" + leak[:7],
+		"/raw/secret.txt?h=" + leak, "/log?h=" + leak} {
+		if code, _ := e.get(anon, "/~alice/pub"+p); code != http.StatusNotFound {
+			t.Errorf("unreachable commit served at %s: %d", p, code)
+		}
+	}
+	// Short hashes of reachable commits redirect to the full one.
+	resp, err := anon.Get(e.srv.URL + "/~alice/pub/commit/" + good[:7])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != "/~alice/pub/commit/"+good {
+		t.Fatalf("short hash: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if code, _ := e.get(anon, "/~alice/pub/tree?h="+good); code != 200 {
+		t.Fatalf("reachable commit not served: %d", code)
+	}
+
+	// Protocol v2 would hand out any object by hash; it is not offered.
+	for i, remote := range []string{"git@git.test:~alice/pub", e.srv.URL + "/~alice/pub"} {
+		d := filepath.Join(e.work, fmt.Sprintf("fetch-%d", i))
+		os.MkdirAll(d, 0o755)
+		e.git("alice", d, "init", "-q")
+		if out, err := e.git("alice", d, "-c", "protocol.version=2", "fetch", "-q", remote, leak); err == nil {
+			t.Errorf("fetched unreachable commit from %s\n%s", remote, out)
+		}
+		if out, err := e.git("alice", d, "-c", "protocol.version=2", "fetch", "-q", remote, "main"); err != nil {
+			t.Errorf("v2 client cannot fetch from %s: %v\n%s", remote, err, out)
+		}
+	}
+}
+
+// Wrong 2FA codes after a correct password are reported at the next login.
+func TestCodeFailureNotice(t *testing.T) {
+	e := newTestEnv(t)
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar}
+	for range 2 {
+		e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {"000000"}}, "")
+	}
+	e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"wrong-password-x"}, "code": {"000000"}}, "")
+	status, body := e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {e.code("alice")}}, "")
+	if status != 200 || !strings.Contains(body, "2 wrong 2FA code(s)") || !strings.Contains(body, "change it now") {
+		t.Fatalf("no notice after wrong codes (%d):\n%s", status, body)
+	}
+	// Reported once: the next login is quiet.
+	e.s.store.Update("alice", func(u *User) error { u.TOTPLast = 0; return nil })
+	jar2, _ := cookiejar.New(nil)
+	if _, body := e.post(&http.Client{Jar: jar2}, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {e.code("alice")}}, ""); strings.Contains(body, "wrong 2FA") {
+		t.Fatal("notice shown twice")
+	}
+}
+
+func TestLimiterTake(t *testing.T) {
+	l := newLimiter(2, time.Minute)
+	if !l.take("k") || !l.take("k") || l.take("k") {
+		t.Fatal("take does not stop at the limit")
+	}
+	l.refund("k")
+	if !l.take("k") || l.take("k") {
+		t.Fatal("refund does not free exactly one attempt")
+	}
+}
+
+func TestRawSVG(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("alice", "pub")
+	dir := filepath.Join(e.work, "alice-pub-src")
+	os.WriteFile(filepath.Join(dir, "x.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o644)
+	e.git("alice", dir, "add", "x.svg")
+	e.git("alice", dir, "commit", "-q", "-m", "svg")
+	if out, err := e.git("alice", dir, "push", "-q", "git@git.test:~alice/pub", "main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	for dest, want := range map[string]string{"document": "attachment", "image": "", "": ""} {
+		req, _ := http.NewRequest("GET", e.srv.URL+"/~alice/pub/raw/x.svg", nil)
+		if dest != "" {
+			req.Header.Set("Sec-Fetch-Dest", dest)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("Content-Disposition"); resp.StatusCode != 200 || got != want {
+			t.Errorf("Sec-Fetch-Dest %q: %d, Content-Disposition %q, want %q", dest, resp.StatusCode, got, want)
+		}
+	}
+}
+
+func TestLoopbackAddr(t *testing.T) {
+	for addr, want := range map[string]bool{"127.0.0.1:8080": true, "localhost:80": true, "[::1]:8080": true,
+		":8080": false, "0.0.0.0:8080": false, "192.0.2.1:8080": false, "example.com:80": false, "bogus": false} {
+		if loopbackAddr(addr) != want {
+			t.Errorf("loopbackAddr(%q) = %v", addr, !want)
+		}
 	}
 }

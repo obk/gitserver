@@ -43,6 +43,7 @@ type Server struct {
 	store    *Store
 	sessions *sessionStore
 	limiter  *limiter
+	alerts   *codeAlerts
 	pending  *pendingSignups
 	box      *secretBox // encrypts TOTP secrets
 	reposDir string
@@ -73,6 +74,7 @@ func NewServer(cfg Config) (*Server, error) {
 		store:    store,
 		sessions: newSessionStore(),
 		limiter:  newLimiter(10, 15*time.Minute),
+		alerts:   newCodeAlerts(),
 		pending:  newPendingSignups(),
 		reposDir: filepath.Join(cfg.DataDir, "repos"),
 		gitPath:  gitPath,
@@ -183,6 +185,10 @@ var gitHTTPRe = regexp.MustCompile(`^/~([a-z0-9][a-z0-9_-]{0,31})/([A-Za-z0-9][A
 // cloneSlots limits concurrent HTTPS clones/fetches (separate from the web UI).
 var cloneSlots = make(chan struct{}, max(2, runtime.NumCPU()))
 
+// cloneTimeout ends an HTTPS clone or fetch that takes longer, so clients
+// that stop reading cannot hold the clone slots forever.
+const cloneTimeout = 30 * time.Minute
+
 func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, name, endpoint string) {
 	plain := func(status int, msg string) {
 		// git shows text/plain error bodies to the user as "remote: ...".
@@ -209,6 +215,14 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 		plain(http.StatusNotFound, "Repository not found. Private repositories can only be cloned over SSH:\n  git clone "+sshURL)
 		return
 	}
+	// When the deadline passes, writes fail and the CGI handler kills git.
+	// The deadlines are cleared afterwards: the connection may be reused.
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(cloneTimeout)
+	rc.SetReadDeadline(deadline)
+	rc.SetWriteDeadline(deadline)
+	defer rc.SetReadDeadline(time.Time{})
+	defer rc.SetWriteDeadline(time.Time{})
 	select {
 	case cloneSlots <- struct{}{}:
 		defer func() { <-cloneSlots }()
@@ -221,6 +235,7 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 	r2 := r.Clone(r.Context())
 	r2.Header.Del("Authorization")
 	r2.Header.Del("Cookie")
+	r2.Header.Del("Git-Protocol") // no protocol v2; see cmdSSHServe
 	r2.URL.Path = "/" + owner + "/" + name + ".git/" + endpoint
 	r2.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 	h := &cgi.Handler{
@@ -276,7 +291,8 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 			rec.status = http.StatusOK
 		}
 		// The query string is deliberately not logged.
-		log.Printf("%s %s %s %d %s", s.clientIP(r), r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+		// %q: the decoded path may contain newlines that would forge log lines.
+		log.Printf("%s %s %q %d %s", s.clientIP(r), r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -407,13 +423,14 @@ func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // startSession issues a fresh session ID (preventing session fixation).
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *User) {
+// A non-empty notice is shown on the password page during this session.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *User, notice string) {
 	if c, err := r.Cookie(s.cookieName()); err == nil {
 		s.sessions.delete(c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.cookieName(),
-		Value:    s.sessions.create(u.Name, credentialFingerprint(u)),
+		Value:    s.sessions.create(u.Name, credentialFingerprint(u), notice),
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		Secure:   !s.cfg.Insecure,

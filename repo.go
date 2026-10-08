@@ -101,6 +101,14 @@ func listRepos(reposDir, owner string) ([]*Repo, error) {
 	return repos, nil
 }
 
+// ownerDirExists reports whether <reposDir>/<owner> exists. Repositories
+// stay on disk when an account is deleted, and ownership goes by name, so
+// such a name must not be given to a new account.
+func ownerDirExists(reposDir, owner string) bool {
+	_, err := os.Lstat(filepath.Join(reposDir, owner))
+	return err == nil
+}
+
 func (r *Repo) canRead(u *User) bool { return r.Public || r.isOwner(u) }
 
 func (r *Repo) canWrite(u *User) bool { return r.isOwner(u) }
