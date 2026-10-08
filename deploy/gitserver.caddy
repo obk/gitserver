@@ -1,8 +1,12 @@
 # Caddy site for gitserver. install.sh replaces git.example.com with $DOMAIN.
 #
-#   browser       ─▶ Caddy :443 (TLS) ─▶ Anubis 127.0.0.1:8923 ─▶ gitserver 127.0.0.1:8080
-#   git clone     ─▶ Caddy :443 (TLS) ──────────────────────────▶ gitserver (read-only, public repos)
+#   browser       ─▶ Caddy :443 (TLS) ─▶ Anubis ─▶ gitserver
+#   git clone     ─▶ Caddy :443 (TLS) ────────────▶ gitserver (read-only, public repos)
 #   git push/pull ─▶ OpenSSH :22 (user "git", see sshd-gitserver.conf)
+#
+# Caddy reaches Anubis and gitserver over Unix sockets that only the
+# gitserver-http group may open (caddy-gitserver.conf adds Caddy to it), so
+# no other local user can talk to them with a made-up X-Real-IP.
 #
 # Git clients cannot solve Anubis challenges, so the smart-HTTP clone
 # endpoints bypass it. gitserver only serves public repos there, read-only.
@@ -12,7 +16,7 @@ git.example.com {
 
 	@gitclone path_regexp gitclone ^/~[^/]+/[^/]+/(info/refs|git-upload-pack|git-receive-pack)$
 	handle @gitclone {
-		reverse_proxy 127.0.0.1:8080 {
+		reverse_proxy unix//run/gitserver/http.sock {
 			header_up X-Real-IP {remote_host}
 			flush_interval -1
 		}
@@ -20,7 +24,7 @@ git.example.com {
 
 	handle {
 		encode zstd gzip
-		reverse_proxy 127.0.0.1:8923 {
+		reverse_proxy unix//run/anubis/gitserver/anubis.sock {
 			header_up X-Real-IP {remote_host}
 			header_up X-Http-Version {http.request.proto}
 			header_up X-TLS-SNI-Name {http.request.tls.server_name}

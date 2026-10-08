@@ -1,7 +1,9 @@
 [Unit]
 Description=gitserver
 Documentation=file:///usr/local/share/doc/gitserver/README.md
-After=network.target
+# The listening socket comes from gitserver.socket (-listen systemd).
+Requires=gitserver.socket
+After=network.target gitserver.socket
 
 [Service]
 Type=simple
@@ -11,7 +13,7 @@ Environment=GITSERVER_DATA=/var/lib/gitserver
 # The 2FA encryption key (root-only file) is handed to the service as a
 # credential; the git user itself cannot read /etc/gitserver/secret.key.
 LoadCredential=secret.key:/etc/gitserver/secret.key
-ExecStart=/usr/local/bin/gitserver serve -listen 127.0.0.1:8080 -base-url https://git.example.com -site "git.example.com" -trust-proxy -real-ip-header X-Real-IP
+ExecStart=/usr/local/bin/gitserver serve -listen systemd -base-url https://git.example.com -site "git.example.com" -trust-proxy -real-ip-header X-Real-IP
 Restart=on-failure
 RestartSec=5s
 

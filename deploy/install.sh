@@ -100,6 +100,18 @@ put() {
 }
 changed() { CHANGED="$CHANGED, $1"; }
 
+# set_env FILE KEY=VALUE: set KEY in an env file, replacing its line or
+# adding one. Returns success only if FILE changed.
+set_env() {
+	grep -qxF "$2" "$1" && return 1
+	key=${2%%=*}
+	if grep -q "^$key=" "$1"; then
+		sed -i "s|^$key=.*|$(printf '%s' "$2" | sed 's/[&|\\]/\\&/g')|" "$1"
+	else
+		printf '%s\n' "$2" >>"$1"
+	fi
+}
+
 # Domains Caddy serves with its own local CA instead of Let's Encrypt.
 internal_domain() {
 	case "$1" in localhost | *.localhost | *.local | *.internal | *.home.arpa) return 0 ;; esac
@@ -389,6 +401,12 @@ usermod --shell /bin/sh git >/dev/null 2>&1 || true
 # rejects locked accounts even for public keys when PAM is disabled).
 usermod -p '*' git >/dev/null 2>&1 || true
 install -d -o git -g git -m 0700 /var/lib/gitserver
+# Caddy and Anubis reach gitserver (and Caddy reaches Anubis) over Unix
+# sockets that only this group may open; no other local user can connect.
+if ! getent group gitserver-http >/dev/null; then
+	groupadd --system gitserver-http
+	changed "socket group"
+fi
 
 step "2FA encryption key"
 install -d -o root -g root -m 0700 /etc/gitserver
@@ -426,6 +444,14 @@ if put "$TMP/gitserver.service" /etc/systemd/system/gitserver.service 0644; then
 else
 	same "systemd unit unchanged"
 fi
+CH_SOCKET=0
+if put "$HERE/gitserver.socket" /etc/systemd/system/gitserver.socket 0644; then
+	ok "socket unit updated (/run/gitserver/http.sock, group gitserver-http only)"
+	changed "socket unit"
+	CH_UNIT=1 CH_SOCKET=1
+else
+	same "socket unit unchanged"
+fi
 
 # ---------------------------------------------------------------- anubis
 
@@ -447,7 +473,25 @@ if [ ! -f /etc/anubis/gitserver.env ]; then
 else
 	same "configuration and signing key kept"
 fi
+# The socket settings are kept as in the template even in an existing file,
+# so updated installs move from localhost ports to Unix sockets.
+SOCKETS_SET=0
+for key in BIND BIND_NETWORK SOCKET_MODE TARGET METRICS_BIND METRICS_BIND_NETWORK; do
+	line=$(grep "^$key=" "$HERE/anubis.env") || die "anubis.env has no $key"
+	set_env /etc/anubis/gitserver.env "$line" && SOCKETS_SET=1
+done
+if [ "$SOCKETS_SET" = 1 ]; then
+	ok "listens on a Unix socket (/run/anubis/gitserver/anubis.sock)"
+	changed "Anubis sockets"
+	CH_ANUBIS=1
+fi
 chmod 0600 /etc/anubis/gitserver.env
+install -d -m 0755 /etc/systemd/system/anubis@gitserver.service.d
+if put "$HERE/anubis-gitserver.conf" /etc/systemd/system/anubis@gitserver.service.d/gitserver.conf 0644; then
+	ok "runs with group gitserver-http (socket access)"
+	changed "Anubis unit drop-in"
+	CH_UNIT=1 CH_ANUBIS=1
+fi
 
 # ---------------------------------------------------------------- caddy
 
@@ -459,15 +503,33 @@ if [ -n "$ACME_EMAIL" ]; then
 else
 	sed -e "s|git\.example\.com|$DOMAIN|g" -e '/^[[:space:]]*# acme-email/d' "$HERE/gitserver.caddy" >"$TMP/gitserver.caddy"
 fi
+install -d -m 0755 /etc/systemd/system/caddy.service.d
+if put "$HERE/caddy-gitserver.conf" /etc/systemd/system/caddy.service.d/gitserver.conf 0644; then
+	ok "runs with group gitserver-http (socket access)"
+	changed "Caddy unit drop-in"
+	CH_UNIT=1
+fi
 CADDYFILE=/etc/caddy/Caddyfile
 cp -p "$PREV_CADDY" "$TMP/caddy.before" 2>/dev/null || true
 cp -p "$CADDYFILE" "$TMP/Caddyfile.before" 2>/dev/null || true
 if put "$TMP/gitserver.caddy" "$PREV_CADDY" 0644; then CH_CADDY=1; fi
-if [ ! -f "$CADDYFILE" ] || grep -q '/usr/share/caddy' "$CADDYFILE"; then
-	# Missing or the distribution's placeholder site: replace it.
-	[ -f "$CADDYFILE" ] && cp "$CADDYFILE" "$CADDYFILE.orig.$(date +%s)"
-	echo 'import /etc/caddy/gitserver.caddy' >"$CADDYFILE"
+# A Caddyfile written by this installer also moves Caddy's admin API from
+# 127.0.0.1:2019, where any local user could rewrite Caddy's configuration,
+# to a Unix socket only the caddy user can open (systemctl reload uses it).
+OWN_CADDYFILE='{
+	admin unix//run/caddy/admin.sock
+}
+
+import /etc/caddy/gitserver.caddy'
+if [ ! -f "$CADDYFILE" ] || grep -q '/usr/share/caddy' "$CADDYFILE" ||
+	[ "$(cat "$CADDYFILE")" = 'import /etc/caddy/gitserver.caddy' ]; then
+	# Missing, the distribution's placeholder site, or written by an older
+	# version of this installer: replace it.
+	grep -q '/usr/share/caddy' "$CADDYFILE" 2>/dev/null && cp "$CADDYFILE" "$CADDYFILE.orig.$(date +%s)"
+	printf '%s\n' "$OWN_CADDYFILE" >"$CADDYFILE"
 	CH_CADDY=1
+elif [ "$(cat "$CADDYFILE")" = "$OWN_CADDYFILE" ]; then
+	: # ours and current
 elif ! grep -q 'import /etc/caddy/gitserver.caddy' "$CADDYFILE"; then
 	cp "$CADDYFILE" "$CADDYFILE.orig.$(date +%s)"
 	printf '\nimport /etc/caddy/gitserver.caddy\n' >>"$CADDYFILE"
@@ -483,6 +545,9 @@ if [ "$CH_CADDY" = 1 ]; then
 	changed "Caddy config"
 else
 	same "site config unchanged"
+fi
+if ! grep -q '^[[:space:]]*admin[[:space:]]*unix//' "$CADDYFILE"; then
+	warn "Caddy's admin API listens on 127.0.0.1:2019, where any local user can change Caddy's configuration. Add a global options block at the top of $CADDYFILE: { admin unix//run/caddy/admin.sock }"
 fi
 
 # ---------------------------------------------------------------- openssh
@@ -536,42 +601,77 @@ fi
 
 step "Services"
 [ "$CH_UNIT" = 1 ] && systemctl daemon-reload
-systemctl enable gitserver.service anubis@gitserver.service caddy.service >>"$LOGFILE" 2>&1
+systemctl enable gitserver.socket gitserver.service anubis@gitserver.service caddy.service >>"$LOGFILE" 2>&1
+RESTARTED=""
 restart() { # restart UNIT REASON
 	systemctl restart "$1" || die "$1 failed to restart; see: journalctl -u $1"
 	ok "restarted $1 ($2)"
+	RESTARTED="$RESTARTED, ${1%.service}"
 }
+# has_group UNIT GROUP: the running process of UNIT is a member of GROUP.
+has_group() {
+	pid=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+	gid=$(getent group "$2" | cut -d: -f3)
+	[ -n "$gid" ] && [ "${pid:-0}" != 0 ] &&
+		awk -v g="$gid" '/^(Gid|Groups):/ { for (i = 2; i <= NF; i++) if ($i == g) found = 1 } END { exit !found }' "/proc/$pid/status"
+}
+# The decisions below look at what is running, not only at what this run
+# changed, so re-running after an interrupted update finishes the job.
+#
+# systemd creates gitserver's socket only while gitserver is stopped (older
+# versions listened on 127.0.0.1:8080 themselves), and a changed socket unit
+# only applies once the socket is recreated. The loop starts gitserver again.
+if [ "$CH_SOCKET" = 1 ] || ! systemctl is-active --quiet gitserver.socket; then
+	systemctl stop gitserver.service 2>>"$LOGFILE"
+	systemctl restart gitserver.socket || die "gitserver.socket failed to start; see: journalctl -u gitserver.socket"
+	ok "started gitserver.socket (/run/gitserver/http.sock)"
+	RESTARTED="$RESTARTED, gitserver.socket"
+fi
 for unit in gitserver.service anubis@gitserver.service caddy.service; do
 	if ! systemctl is-active --quiet "$unit"; then
 		systemctl start "$unit" || die "$unit failed to start; see: journalctl -u $unit"
 		ok "started $unit"
-	elif [ "$MODE" = install ]; then
-		case "$unit" in
-		caddy.service) systemctl reload-or-restart caddy.service && ok "reloaded caddy.service" ;;
-		*) restart "$unit" "install" ;;
-		esac
-	else
-		case "$unit" in
-		gitserver.service)
-			if [ "$CH_GITSERVER" = 1 ] || [ "$CH_UNIT" = 1 ] || [ "${NEW_KEY:-0}" = 1 ]; then
-				restart "$unit" "new version"
-			else
-				same "gitserver.service running, not restarted"
-			fi
-			;;
-		anubis@gitserver.service)
-			if [ "$CH_ANUBIS" = 1 ]; then restart "$unit" "new policy"; else same "anubis running, not restarted"; fi
-			;;
-		caddy.service)
-			if [ "$CH_CADDY" = 1 ]; then
-				systemctl reload caddy.service || die "caddy reload failed; see: journalctl -u caddy"
-				ok "reloaded caddy.service (new config, no downtime)"
-			else
-				same "caddy running, not reloaded"
-			fi
-			;;
-		esac
+		RESTARTED="$RESTARTED, ${unit%.service}"
+		continue
 	fi
+	case "$unit" in
+	gitserver.service)
+		if [ "$MODE" = install ]; then
+			restart "$unit" "install"
+		elif [ "$CH_GITSERVER" = 1 ] || [ "$CH_UNIT" = 1 ] || [ "${NEW_KEY:-0}" = 1 ]; then
+			restart "$unit" "new version"
+		else
+			same "gitserver.service running, not restarted"
+		fi
+		;;
+	anubis@gitserver.service)
+		if [ "$MODE" = install ]; then
+			restart "$unit" "install"
+		elif [ ! -S /run/anubis/gitserver/anubis.sock ]; then
+			restart "$unit" "Unix socket"
+		elif [ "$CH_ANUBIS" = 1 ]; then
+			restart "$unit" "new settings"
+		else
+			same "anubis running, not restarted"
+		fi
+		;;
+	caddy.service)
+		if ! has_group caddy.service gitserver-http; then
+			# A reload keeps the old process, which lacks the socket group.
+			restart "$unit" "socket access"
+		elif grep -q 'admin unix//run/caddy/admin.sock' "$CADDYFILE" && [ ! -S /run/caddy/admin.sock ]; then
+			# A reload would look for the admin API on the new socket, which
+			# the running process does not have yet.
+			restart "$unit" "admin API on a Unix socket"
+		elif [ "$MODE" = install ] || [ "$CH_CADDY" = 1 ]; then
+			systemctl reload caddy.service || die "caddy reload failed; see: journalctl -u caddy"
+			ok "reloaded caddy.service (new config, no downtime)"
+			RESTARTED="$RESTARTED, caddy (reload)"
+		else
+			same "caddy running, not reloaded"
+		fi
+		;;
+	esac
 done
 sleep 1
 STATUS=""
@@ -580,10 +680,22 @@ for unit in gitserver anubis@gitserver caddy; do
 	STATUS="$STATUS $unit ✓"
 done
 i=0
-until curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:8080/static/style.css 2>/dev/null; do
+until curl -fsS -o /dev/null --max-time 3 --unix-socket /run/gitserver/http.sock http://localhost/static/style.css 2>/dev/null; do
 	i=$((i + 1))
-	[ "$i" -ge 15 ] && die "gitserver does not answer on 127.0.0.1:8080; see: journalctl -u gitserver"
+	[ "$i" -ge 15 ] && die "gitserver does not answer on /run/gitserver/http.sock; see: journalctl -u gitserver"
 	sleep 1
+done
+# Anubis creates its socket shortly after starting; any HTTP answer will do
+# (it may be a challenge page).
+i=0
+until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --unix-socket /run/anubis/gitserver/anubis.sock \
+	-H 'X-Real-IP: 127.0.0.1' "http://$DOMAIN/" 2>/dev/null)" != 000 ]; do
+	i=$((i + 1))
+	[ "$i" -ge 15 ] && die "Anubis does not answer on /run/anubis/gitserver/anubis.sock; see: journalctl -u anubis@gitserver"
+	sleep 1
+done
+for sock in /run/gitserver/http.sock /run/anubis/gitserver/anubis.sock; do
+	[ "$(stat -c %G:%a "$sock")" = gitserver-http:660 ] || warn "$sock is $(stat -c %U:%G/%a "$sock"), expected group gitserver-http, mode 660"
 done
 ok "all running:$STATUS"
 
@@ -606,8 +718,10 @@ cannot be decrypted without it."
 
 if [ "$MODE" = update ]; then
 	echo
-	if [ -z "$CHANGED" ]; then
+	if [ -z "$CHANGED" ] && [ -z "$RESTARTED" ]; then
 		bold "Up to date: nothing changed on $DOMAIN (${NEW_VERSION:-same version}); no services were restarted."
+	elif [ -z "$CHANGED" ]; then
+		bold "No files changed on $DOMAIN, but services were brought up to date: ${RESTARTED#, }."
 	else
 		bold "Updated $DOMAIN: ${CHANGED#, }."
 	fi

@@ -26,7 +26,7 @@ run() {
 
 case "${1:-help}" in
 status)
-	exec systemctl status --no-pager --lines=5 gitserver.service anubis@gitserver.service caddy.service
+	exec systemctl status --no-pager --lines=5 gitserver.socket gitserver.service anubis@gitserver.service caddy.service
 	;;
 logs)
 	shift

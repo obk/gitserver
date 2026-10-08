@@ -39,14 +39,14 @@ There's no JavaScript in the web UI and no external services. All data lives on 
 ## How it works
 
 ```
-browser        ─▶ Caddy :443 (HTTPS) ─▶ Anubis 127.0.0.1:8923 ─▶ gitserver 127.0.0.1:8080   web UI
-git clone      ─▶ Caddy :443 (HTTPS) ───────────────────────────▶ gitserver                  public repos, read-only
-git push/pull  ─▶ OpenSSH :22, user "git" ─▶ gitserver ssh-serve ─▶ git                       SSH key login
+browser        ─▶ Caddy :443 (HTTPS) ─▶ Anubis ─▶ gitserver   web UI          (Unix sockets between them)
+git clone      ─▶ Caddy :443 (HTTPS) ────────────▶ gitserver   public repos, read-only
+git push/pull  ─▶ OpenSSH :22, user "git" ─▶ gitserver ssh-serve ─▶ git   SSH key login
 ```
 
 - **Caddy** terminates HTTPS. It gets a Let's Encrypt certificate automatically and renews it.
 - **[Anubis](https://github.com/TecharoHQ/anubis)** sits in front of the web UI. It gives browsers a one-time proof-of-work check, so AI scrapers and crawlers can't hammer every commit and diff page. Git clients can't solve that check, so Caddy sends git's clone requests directly to gitserver.
-- **gitserver** serves the web UI and HTTPS clones. It listens only on `127.0.0.1`, so it's never directly reachable from the internet.
+- **gitserver** serves the web UI and HTTPS clones. It listens on a Unix socket, `/run/gitserver/http.sock`, not on a network port, so it's never directly reachable from the internet. Caddy, Anubis and gitserver talk to each other only over Unix sockets that just the `gitserver-http` group (Caddy and Anubis) may open, so other users on the server can't reach them either.
 - **Git over SSH** uses the server's normal OpenSSH with a dedicated `git` user. When you connect, sshd asks `gitserver ssh-keys` whether your key belongs to an account. If it does, the only thing that key can run is `gitserver ssh-serve`, which checks permissions and starts git. There's no shell, no port forwarding and no terminal. Your own admin SSH login is not affected.
 - **Data:** repositories are plain bare git repositories on disk. Users, SSH keys and invites are in a SQLite database. The 2FA secrets in it are encrypted with a key kept outside the database.
 
@@ -160,9 +160,9 @@ With `DOMAIN=…` set (as `make deploy` does), it skips the domain questions. Se
 1. Installs `git`, `caddy`, `curl` and `openssl` from your distribution, and **Anubis 1.27.0** from its GitHub release, checking the package's SHA-256.
 2. Creates the system user **`git`** (home `/var/lib/gitserver`, no password, no usable shell).
 3. Creates the **2FA encryption key** `/etc/gitserver/secret.key` (root only). It's never replaced on later runs.
-4. Installs `/usr/local/bin/gitserver`, the admin helper `/usr/local/sbin/gitserverctl`, and the sandboxed systemd service.
-5. Configures **Anubis**: a persistent signing key, metrics on localhost only, and a bot policy.
-6. Configures **Caddy** for your domain, and adds an `import` line to `/etc/caddy/Caddyfile`, backing up an existing one first.
+4. Installs `/usr/local/bin/gitserver`, the admin helper `/usr/local/sbin/gitserverctl`, the sandboxed systemd service, and `gitserver.socket`, which creates gitserver's socket. Creates the group **`gitserver-http`**, the only one allowed to open that socket.
+5. Configures **Anubis**: a persistent signing key, a bot policy, and Unix sockets for its traffic and metrics. Anubis runs with the `gitserver-http` group (a systemd drop-in).
+6. Configures **Caddy** for your domain and adds it to the `gitserver-http` group (a systemd drop-in). If `/etc/caddy/Caddyfile` is the distribution's placeholder, it's backed up and replaced with one that imports the gitserver site and moves Caddy's admin API from `127.0.0.1:2019` to a Unix socket only Caddy can open. An existing Caddyfile of your own only gets an `import` line, and the installer tells you how to move the admin API yourself.
 7. Adds **`/etc/ssh/sshd_config.d/50-gitserver.conf`**, a `Match User git` block. It checks the result with `sshd -t` and **rolls back automatically** if sshd rejects it, so it can't break your SSH access.
 8. **Firewall** (see above). Before enabling ufw, it detects every port your SSH server listens on (including custom ports and Ubuntu's `ssh.socket`) and allows those first, so you can't lock yourself out.
 9. Enables and starts everything, then checks that all three services run and that gitserver answers.
@@ -205,7 +205,7 @@ Re-running `install.sh` (or `make update`) runs as a **quick update** when gitse
 
 - **no questions:** domain, site name and email are read from the existing setup
 - **no package installs**, unless something is missing
-- **only files whose content changed are replaced**, and **only affected services restart**: gitserver for a new binary or unit, Anubis for a new policy; Caddy is *reloaded* without downtime. If nothing changed, nothing restarts.
+- **only files whose content changed are replaced**, and **only affected services restart**: gitserver for a new binary or unit, Anubis for a new policy; Caddy is *reloaded* without downtime. If nothing changed, nothing restarts. If an earlier run was interrupted, a re-run finishes the restarts it missed.
 - a **progress bar** for each step, and a one-line summary:
 
 ```
@@ -216,7 +216,9 @@ Updated git.example.com: gitserver binary.
   Version:  a1b2c3d -> e4f5a6b
 ```
 
-Your data, the 2FA key and the Anubis signing key are never touched. To change settings (domain, site name, email, firewall), run with `RECONFIGURE=1`:
+Your data, the 2FA key and the Anubis signing key are never touched.
+
+> **Updating from a version that used localhost ports** (`127.0.0.1:8080` and `8923`): just run the installer again. It moves gitserver, Anubis and Caddy to Unix sockets, keeps your Anubis signing key, and restarts the three services once (a few seconds of downtime). To change settings (domain, site name, email, firewall), run with `RECONFIGURE=1`:
 
 ```sh
 make deploy HOST=root@git.example.com DOMAIN=git.example.com RECONFIGURE=1
@@ -399,12 +401,12 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
 - **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
-  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L13), [`secret.key`](deploy/install.sh#L396), [`run`](deploy/gitserverctl#L16).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L413), [`run`](deploy/gitserverctl#L16).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
   - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L166).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L156).
-- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L76), [`passwordOK`](internal/web/login.go#L65).
+- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
 - **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. Code: [`codeAlerts`](internal/web/ratelimit.go#L103), [`alerts.take`](internal/web/login.go#L88).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L51).
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L195).
@@ -440,13 +442,14 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L81).
 - **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L392), [`sandbox`](internal/web/repos.go#L422), [`Content-Disposition`](internal/web/repos.go#L427), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
-- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Code: [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L14), [`generic-browser`](deploy/anubis.botPolicies.yaml#L22).
+- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Code: [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L22).
 
 ### Server
 
-- **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L22).
-- **Nothing extra faces the internet:** gitserver, Anubis and its metrics listen only on `127.0.0.1`. Code: [`127.0.0.1:8080`](deploy/gitserver.service#L14), [`BIND`](deploy/anubis.env#L4), [`METRICS_BIND`](deploy/anubis.env#L10).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L391), [`0o600`](internal/store/store.go#L117), [`secure_delete`](internal/store/store.go#L124).
+- **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
+- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L520).
+- **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L403), [`0o600`](internal/store/store.go#L117), [`secure_delete`](internal/store/store.go#L124).
 
 ---
 
@@ -457,7 +460,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 | Flag | Default | Meaning |
 |---|---|---|
 | `-data DIR` | `$GITSERVER_DATA` or `./data` | data folder (all commands accept it) |
-| `-listen ADDR` | `127.0.0.1:8080` | listen address |
+| `-listen ADDR` | `127.0.0.1:8080` | `host:port` for TCP; `unix:/path/to.sock` for a Unix socket (mode `0660`); `systemd` for the socket systemd passes in (socket activation, as `gitserver.socket` does) |
 | `-base-url URL` | from request | public URL, e.g. `https://git.example.com`, used for clone and invite links |
 | `-ssh-host HOST` | host of `-base-url` | host shown in SSH clone URLs |
 | `-site NAME` | `git` | site name in the page header |
@@ -521,14 +524,18 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | `/var/lib/gitserver/repos/OWNER/NAME.git` | bare repositories |
 | `/var/lib/gitserver/intro.md` | optional landing page text |
 | `/etc/gitserver/secret.key` | 2FA encryption key (root, `0600`) |
-| `/etc/systemd/system/gitserver.service` | systemd unit |
+| `/etc/systemd/system/gitserver.service`, `gitserver.socket` | systemd unit and the socket it listens on |
+| `/run/gitserver/http.sock` | gitserver's socket (`git:gitserver-http`, `0660`) |
+| `/run/anubis/gitserver/anubis.sock`, `metrics.sock` | Anubis' sockets (group `gitserver-http`, `0660`) |
+| `/run/caddy/admin.sock` | Caddy's admin API (`caddy` only) |
+| `/etc/systemd/system/anubis@gitserver.service.d/gitserver.conf`, `caddy.service.d/gitserver.conf` | drop-ins that add Anubis and Caddy to the `gitserver-http` group |
 | `/etc/ssh/sshd_config.d/50-gitserver.conf` | sshd config for the `git` user |
 | `/etc/anubis/gitserver.env`, `gitserver.botPolicies.yaml` | Anubis config and bot policy |
-| `/etc/caddy/gitserver.caddy` (+ import in `/etc/caddy/Caddyfile`) | Caddy site |
+| `/etc/caddy/gitserver.caddy` (+ `/etc/caddy/Caddyfile`, see the installer steps) | Caddy site |
 | `/var/log/caddy/gitserver.log` | Caddy access log |
 | `/var/log/gitserver-install.log` | installer log |
 
-Source files in `deploy/` map to these: `gitserver.service`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `gitserverctl`, `install.sh`.
+Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `gitserverctl`, `install.sh`.
 
 ---
 
@@ -562,6 +569,8 @@ Source files in `deploy/` map to these: `gitserver.service`, `sshd-gitserver.con
 
 **The page says "Making sure you're not a bot!" and doesn't continue.** That's Anubis. Enable JavaScript for the site once; the cookie lasts 7 days.
 
+**`502 Bad Gateway` or Anubis errors like "permission denied" on a socket.** Caddy or Anubis can't open `/run/gitserver/http.sock` or `/run/anubis/gitserver/anubis.sock`. Run the installer again: it recreates the `gitserver-http` group, the drop-ins and the sockets, and restarts whatever is missing them. To check by hand: `ls -l /run/gitserver/http.sock /run/anubis/gitserver/anubis.sock` (both group `gitserver-http`, `srw-rw----`) and `grep Groups /proc/$(systemctl show -p MainPID --value caddy)/status` (must include the group's ID from `getent group gitserver-http`).
+
 **Anything else:** `sudo gitserverctl status` and `sudo gitserverctl logs`.
 
 ---
@@ -569,12 +578,14 @@ Source files in `deploy/` map to these: `gitserver.service`, `sshd-gitserver.con
 ## Uninstalling
 
 ```sh
-sudo systemctl disable --now gitserver anubis@gitserver
+sudo systemctl disable --now gitserver.socket gitserver anubis@gitserver
 sudo rm /etc/ssh/sshd_config.d/50-gitserver.conf && sudo systemctl try-reload-or-restart ssh   # 'sshd' on Fedora
-sudo rm /etc/caddy/gitserver.caddy
-sudo sed -i '/import \/etc\/caddy\/gitserver.caddy/d' /etc/caddy/Caddyfile && sudo systemctl reload caddy
-sudo rm /etc/systemd/system/gitserver.service /usr/local/bin/gitserver /usr/local/sbin/gitserverctl
-sudo systemctl daemon-reload
+sudo rm /etc/caddy/gitserver.caddy /etc/systemd/system/caddy.service.d/gitserver.conf
+# In /etc/caddy/Caddyfile, remove the "import /etc/caddy/gitserver.caddy" line and the
+# "{ admin unix//run/caddy/admin.sock }" block (the original, if any, is Caddyfile.orig.*).
+sudo rm -r /etc/systemd/system/gitserver.service /etc/systemd/system/gitserver.socket \
+  /etc/systemd/system/anubis@gitserver.service.d /usr/local/bin/gitserver /usr/local/sbin/gitserverctl
+sudo systemctl daemon-reload && sudo systemctl restart caddy && sudo groupdel gitserver-http
 # Data and keys; back them up first if you want to keep them:
 #   /var/lib/gitserver  /etc/gitserver  /etc/anubis/gitserver.*
 ```

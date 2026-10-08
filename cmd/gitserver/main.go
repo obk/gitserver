@@ -33,6 +33,7 @@ const usage = `gitserver - minimal self-hosted git server (web UI, git over SSH,
 Usage:
   gitserver serve [-listen ADDR] [-base-url URL] [-ssh-host HOST] [-site NAME]
                   [-tls-cert FILE -tls-key FILE] [-trust-proxy [-real-ip-header X-Real-IP]] [-insecure]
+                  (-listen takes host:port, unix:/path/to.sock, or systemd for socket activation)
   gitserver user add [-admin] [-ssh-key KEY] [-issuer NAME] USER
                                                       create a user (password, TOTP, SSH key)
   gitserver user passwd USER                          set a new password
@@ -113,7 +114,7 @@ func newFlagSet(name string) (*flag.FlagSet, *string) {
 func cmdServe(args []string) error {
 	fs, data := newFlagSet("serve")
 	var cfg web.Config
-	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address")
+	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address: host:port, unix:/path/to.sock, or systemd (socket activation)")
 	fs.StringVar(&cfg.BaseURL, "base-url", "", "public base URL of the web UI, e.g. https://git.example.com")
 	fs.StringVar(&cfg.SSHHost, "ssh-host", "", "host in SSH clone URLs (default: host of -base-url)")
 	fs.StringVar(&cfg.SiteName, "site", "git", "site name shown in the header")
@@ -141,8 +142,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	ln, err := listen(cfg.Listen)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
-		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -155,9 +159,9 @@ func cmdServe(args []string) error {
 	go func() {
 		log.Printf("listening on %s (data: %s)", cfg.Listen, cfg.DataDir)
 		if cfg.TLSCert != "" {
-			errc <- srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
+			errc <- srv.ServeTLS(ln, cfg.TLSCert, cfg.TLSKey)
 		} else {
-			errc <- srv.ListenAndServe()
+			errc <- srv.Serve(ln)
 		}
 	}()
 	select {
