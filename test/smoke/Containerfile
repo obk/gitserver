@@ -1,6 +1,6 @@
 # A throwaway "VPS" for smoke-testing deploy/install.sh: Ubuntu with systemd,
 # socket-activated OpenSSH and ufw installed but off, like a fresh
-# DigitalOcean droplet. See "Smoke tests" in CLAUDE.md.
+# DigitalOcean droplet. See "Development" in README.md.
 #
 #   podman build -t gitserver-smoke test/smoke
 #   podman run -d --name gs --privileged --systemd=always \
