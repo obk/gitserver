@@ -250,8 +250,14 @@ func (s *Server) handleSignupConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pending.delete(token)
 	log.Printf("signup user=%q invited_by=%q ip=%s", u.Name, u.InvitedBy, ip)
-	s.startSession(w, r, u, "")
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	id := s.startSession(w, r, u, "")
+	// Every new account starts with recovery codes, shown once.
+	if err := s.newRecoveryCodes(u.Name, id); err != nil {
+		log.Printf("signup: recovery codes for user=%q: %v", u.Name, err)
+		http.Redirect(w, r, "/settings/2fa", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings/2fa?welcome=1", http.StatusSeeOther)
 }
 
 // qrSVG renders text as an inline SVG QR code (allowed by the CSP, unlike

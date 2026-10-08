@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -244,15 +245,27 @@ var codeAlertsSchema = []string{
 	) STRICT`,
 }
 
-// ensureCodeAlerts adds code_alerts to a database created before it
-// existed. Like ensureUsedNames, it only writes when the table is missing.
-func (s *Store) ensureCodeAlerts() error {
+// recoveryCodesSchema holds the unused 2FA recovery codes of each user
+// (account.HashRecoveryCode; the codes themselves are never stored). Added
+// like code_alerts, so older versions still open the database.
+var recoveryCodesSchema = []string{
+	`CREATE TABLE IF NOT EXISTS recovery_codes (
+		user TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE,
+		hash TEXT NOT NULL,
+		PRIMARY KEY (user, hash)
+	) STRICT`,
+}
+
+// ensureTable adds a table that was introduced after schema version 1 to a
+// database created before it existed. Like ensureUsedNames, it only writes
+// when the table is missing.
+func (s *Store) ensureTable(name string, schema []string) error {
 	var n int
-	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_alerts'`).Scan(&n); err != nil || n > 0 {
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n); err != nil || n > 0 {
 		return err
 	}
 	return s.tx(func(tx *sql.Tx) error {
-		for _, stmt := range codeAlertsSchema {
+		for _, stmt := range schema {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -271,7 +284,10 @@ func (s *Store) migrate(dataDir string) error {
 		if err := s.ensureUsedNames(dataDir); err != nil {
 			return err
 		}
-		return s.ensureCodeAlerts()
+		if err := s.ensureTable("code_alerts", codeAlertsSchema); err != nil {
+			return err
+		}
+		return s.ensureTable("recovery_codes", recoveryCodesSchema)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -288,7 +304,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range append(usedNamesSchema, codeAlertsSchema...) {
+		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -482,6 +498,40 @@ func (s *Store) TakeCodeFailures(user string) (n int, since time.Time, err error
 		return 0, time.Time{}, err
 	}
 	return n, since, nil
+}
+
+// SetRecoveryCodes replaces all recovery codes of user with these hashes
+// (account.HashRecoveryCode), so older codes stop working.
+func (s *Store) SetRecoveryCodes(user string, hashes []string) error {
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user = ?`, user); err != nil {
+			return err
+		}
+		for _, h := range hashes {
+			if _, err := tx.Exec(`INSERT INTO recovery_codes (user, hash) VALUES (?, ?)`, user, h); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// UseRecoveryCode deletes the recovery code with this hash and reports
+// whether user had it. Each code works only once, even for parallel logins.
+func (s *Store) UseRecoveryCode(user, hash string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM recovery_codes WHERE user = ? AND hash = ?`, user, hash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// RecoveryCodesLeft returns how many unused recovery codes user has.
+func (s *Store) RecoveryCodesLeft(user string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM recovery_codes WHERE user = ?`, user).Scan(&n)
+	return n, err
 }
 
 // NameUsed reports whether name belongs, or once belonged, to an account.

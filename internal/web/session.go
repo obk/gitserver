@@ -19,12 +19,15 @@ const (
 )
 
 type session struct {
-	user    string
-	credFP  string // credentialFingerprint at login
-	csrf    string
-	notice  string // security warning shown on the password page
-	created time.Time
-	seen    time.Time
+	user   string
+	credFP string // credentialFingerprint at login
+	csrf   string
+	notice string // security warning shown on the password and 2FA pages
+	// newCodes are recovery codes just generated for this session's user,
+	// shown once on the 2FA page (takeNewCodes) and then forgotten.
+	newCodes []string
+	created  time.Time
+	seen     time.Time
 }
 
 type sessionStore struct {
@@ -46,6 +49,29 @@ func newSessionStore() *sessionStore {
 // changes, which ends all existing sessions of that user.
 func credentialFingerprint(u *store.User) string {
 	return account.HashToken(u.PasswordHash + "\x00" + u.TOTPSecret)
+}
+
+// setNewCodes keeps freshly generated recovery codes for the session with
+// id until the 2FA page shows them.
+func (s *sessionStore) setNewCodes(id string, codes []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess := s.m[account.HashToken(id)]; sess != nil {
+		sess.newCodes = codes
+	}
+}
+
+// takeNewCodes returns and forgets the codes set by setNewCodes.
+func (s *sessionStore) takeNewCodes(id string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.m[account.HashToken(id)]
+	if sess == nil {
+		return nil
+	}
+	codes := sess.newCodes
+	sess.newCodes = nil
+	return codes
 }
 
 func (s *sessionStore) create(user, credFP, notice string) string {
@@ -191,20 +217,23 @@ func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // startSession issues a fresh session ID (preventing session fixation).
-// A non-empty notice is shown on the password page during this session.
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *store.User, notice string) {
+// A non-empty notice is shown on the password and 2FA pages during this
+// session. It returns the new session's ID.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *store.User, notice string) string {
 	if c, err := r.Cookie(s.cookieName()); err == nil {
 		s.sessions.delete(c.Value)
 	}
+	id := s.sessions.create(u.Name, credentialFingerprint(u), notice)
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.cookieName(),
-		Value:    s.sessions.create(u.Name, credentialFingerprint(u), notice),
+		Value:    id,
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		Secure:   !s.cfg.Insecure,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	return id
 }
 
 func (s *Server) validCSRF(r *http.Request) bool {

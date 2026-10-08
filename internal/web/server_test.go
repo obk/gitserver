@@ -543,6 +543,9 @@ func TestInviteSignup(t *testing.T) {
 	if status != 200 || !strings.Contains(body, "~carol") {
 		t.Fatalf("signup did not log in (%d):\n%s", status, body)
 	}
+	if !strings.Contains(body, "Your recovery codes") || len(recoveryCodeRe.FindAllString(body, -1)) != 10 {
+		t.Fatalf("new account got no recovery codes:\n%s", body)
+	}
 	u, err := e.s.store.Get("carol")
 	if err != nil || u.Admin || u.InvitedBy != "alice" || len(u.SSHKeys) != 1 || u.SSHKeys[0].Comment != "carol@laptop" {
 		t.Fatalf("bad user record: %+v, %v", u, err)
@@ -876,4 +879,91 @@ func mustList(t *testing.T, e *testEnv, owner string) []*gitrepo.Repo {
 		t.Fatal(err)
 	}
 	return repos
+}
+
+var recoveryCodeRe = regexp.MustCompile(`[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}`)
+
+// Recovery codes are shown once, and each lets its owner log in once
+// without the authenticator.
+func TestRecoveryCodes(t *testing.T) {
+	e := newTestEnv(t)
+	alice := e.login("alice")
+	_, body := e.get(alice, "/settings/2fa")
+	if !strings.Contains(body, "You have no recovery codes") {
+		t.Fatalf("no warning without codes:\n%s", body)
+	}
+	csrf := csrfToken(t, body)
+	if status, _ := e.post(alice, "/settings/2fa/recovery", url.Values{"csrf": {csrf}, "current": {"wrong-password-x"}}, ""); status != http.StatusUnauthorized {
+		t.Fatalf("codes made with a wrong password: %d", status)
+	}
+	status, body := e.post(alice, "/settings/2fa/recovery", url.Values{"csrf": {csrf}, "current": {"alice-password-123"}}, "")
+	codes := recoveryCodeRe.FindAllString(body, -1)
+	if status != 200 || len(codes) != 10 || !strings.Contains(body, "shown only this once") {
+		t.Fatalf("codes not shown (%d, %d codes):\n%s", status, len(codes), body)
+	}
+	if _, body := e.get(alice, "/settings/2fa"); recoveryCodeRe.MatchString(body) || !strings.Contains(body, "<b>10</b> unused") {
+		t.Fatal("codes shown twice, or not counted")
+	}
+
+	login := func(code string) (int, string) {
+		jar, _ := cookiejar.New(nil)
+		return e.post(&http.Client{Jar: jar}, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {code}}, "")
+	}
+	// Typed in capitals and without dashes, it is still the code.
+	status, body = login(strings.ToUpper(strings.ReplaceAll(codes[3], "-", " ")))
+	if status != 200 || !strings.Contains(body, "logged in with a recovery code") || !strings.Contains(body, "9 left") {
+		t.Fatalf("recovery code login (%d):\n%s", status, body)
+	}
+	if status, _ := login(codes[3]); status != http.StatusUnauthorized {
+		t.Fatalf("recovery code worked twice: %d", status)
+	}
+	// The failed reuse counts as a wrong code entered with the password.
+	if status, body := login(codes[4]); status != 200 || !strings.Contains(body, "1 wrong 2FA code(s)") {
+		t.Fatalf("reused code not reported (%d):\n%s", status, body)
+	}
+	// Without the password, a recovery code is useless.
+	jar, _ := cookiejar.New(nil)
+	if status, _ := e.post(&http.Client{Jar: jar}, "/login", url.Values{"username": {"alice"}, "password": {"wrong-password-x"}, "code": {codes[5]}}, ""); status != http.StatusUnauthorized {
+		t.Fatalf("recovery code without password: %d", status)
+	}
+	if n, _ := e.s.store.RecoveryCodesLeft("alice"); n != 8 {
+		t.Fatalf("%d codes left, want 8", n)
+	}
+}
+
+// A user who lost their phone sets up a new authenticator themselves.
+func TestNewAuthenticator(t *testing.T) {
+	e := newTestEnv(t)
+	alice := e.login("alice")
+	other := e.login("alice") // another browser
+	_, body := e.get(alice, "/settings/2fa")
+	csrf := csrfToken(t, body)
+	if status, _ := e.post(alice, "/settings/2fa/totp", url.Values{"csrf": {csrf}, "current": {"wrong-password-x"}}, ""); status != http.StatusUnauthorized {
+		t.Fatalf("setup with a wrong password: %d", status)
+	}
+	status, body := e.post(alice, "/settings/2fa/totp", url.Values{"csrf": {csrf}, "current": {"alice-password-123"}}, "")
+	m := regexp.MustCompile(`<pre class="secret">([A-Z2-7]+)</pre>`).FindStringSubmatch(body)
+	if status != 200 || m == nil || !strings.Contains(body, "<svg") {
+		t.Fatalf("no setup step (%d):\n%s", status, body)
+	}
+	if status, _ := e.post(alice, "/settings/2fa/totp/confirm", url.Values{"csrf": {csrf}, "totp": {"000000"}}, ""); status != http.StatusBadRequest {
+		t.Fatalf("wrong confirmation code accepted: %d", status)
+	}
+	oldSecret := e.secrets["alice"]
+	e.secrets["alice"] = m[1]
+	status, body = e.post(alice, "/settings/2fa/totp/confirm", url.Values{"csrf": {csrf}, "totp": {e.code("alice")}}, "")
+	if status != 200 || !strings.Contains(body, "New authenticator set up") {
+		t.Fatalf("confirm (%d):\n%s", status, body)
+	}
+	if _, body := e.get(other, "/settings/keys"); strings.Contains(body, "Log out") {
+		t.Fatal("other session survived the new authenticator")
+	}
+	// The old app's codes no longer work; the new app's do.
+	key, _ := account.Base32.DecodeString(oldSecret)
+	oldCode := account.HOTP(key, uint64(time.Now().Unix()/account.TOTPPeriod))
+	jar, _ := cookiejar.New(nil)
+	if status, _ := e.post(&http.Client{Jar: jar}, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {oldCode}}, ""); status != http.StatusUnauthorized {
+		t.Fatalf("old authenticator still works: %d", status)
+	}
+	e.login("alice")
 }

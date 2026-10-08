@@ -1,0 +1,37 @@
+{{define "content"}}{{with .Data}}<div class="narrow-left">
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="success">{{.Notice}}</div>{{end}}
+{{if .NewCodes}}<h3>Your recovery codes</h3>
+<p><b>Save these now; they are shown only this once.</b> Keep them somewhere safe, apart from your phone (a password manager, or on paper). If you lose your authenticator, log in with your password and one of these codes instead of the 6-digit code. Each code works once.</p>
+<pre class="secret">{{range .NewCodes}}{{.}}
+{{end}}</pre>
+<p class="muted">Making new codes replaces these.</p>
+{{else if .Setup}}<h3>Set up a new authenticator</h3>
+<p>Scan this code with your authenticator app (Aegis, 2FAS, Google Authenticator, 1Password, ...):</p>
+<div class="qr-box">{{.QR}}</div>
+<details><summary>Can't scan it? Enter the key manually</summary><pre class="secret">{{.Secret}}</pre><small class="muted">TOTP, SHA-1, 6 digits, 30 seconds</small></details>
+<form method="post" action="/settings/2fa/totp/confirm" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="totp">Code from the new app</label>
+<input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123456" required autofocus>
+<button type="submit" class="btn">Use this authenticator &rarr;</button>
+</form>
+<p class="muted">Until you confirm, your old authenticator keeps working. This step expires after 15 minutes.</p>
+{{else}}<h3>Recovery codes</h3>
+{{if .CodesLeft}}<p>You have <b>{{.CodesLeft}}</b> unused recovery code{{if ne .CodesLeft 1}}s{{end}}. Each one lets you log in once without your authenticator.</p>
+{{else}}<div class="alert">You have no recovery codes. Without them, losing your phone locks you out until an administrator helps. Make some now.</div>{{end}}
+<form method="post" action="/settings/2fa/recovery" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="current-codes">Current password</label>
+<input id="current-codes" name="current" type="password" autocomplete="current-password" maxlength="1024" required>
+<button type="submit" class="btn">{{if .CodesLeft}}Replace with new codes{{else}}Make recovery codes{{end}} &rarr;</button>
+</form>
+<h3>Authenticator</h3>
+<p>Lost your phone, or moving to a new one? Set up a new authenticator; the old one stops working once you confirm.</p>
+<form method="post" action="/settings/2fa/totp" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="current-totp">Current password</label>
+<input id="current-totp" name="current" type="password" autocomplete="current-password" maxlength="1024" required>
+<button type="submit" class="btn">Set up a new authenticator &rarr;</button>
+</form>
+{{end}}</div>{{end}}{{end}}
