@@ -228,6 +228,39 @@ func (s *Store) ensureUsedNames(dataDir string) error {
 	return s.tx(func(tx *sql.Tx) error { return addUsedNames(tx, dataDir) })
 }
 
+// codeAlertsSchema counts wrong 2FA codes entered together with a user's
+// correct password, which means someone else may know the password. The
+// user is told at their next login (see TakeCodeFailures). Stored here, not
+// in memory, so restarting the server can't hide an attack.
+//
+// Like used_names, the table is created when the store opens, without
+// changing user_version: older versions of gitserver still open the
+// database and simply don't use it.
+var codeAlertsSchema = []string{
+	`CREATE TABLE IF NOT EXISTS code_alerts (
+		user     TEXT PRIMARY KEY REFERENCES users(name) ON DELETE CASCADE,
+		failures INTEGER NOT NULL,
+		since    INTEGER NOT NULL
+	) STRICT`,
+}
+
+// ensureCodeAlerts adds code_alerts to a database created before it
+// existed. Like ensureUsedNames, it only writes when the table is missing.
+func (s *Store) ensureCodeAlerts() error {
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_alerts'`).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		for _, stmt := range codeAlertsSchema {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // migrate creates the schema and, on first start, imports the old db.json.
 func (s *Store) migrate(dataDir string) error {
 	var version int
@@ -235,7 +268,10 @@ func (s *Store) migrate(dataDir string) error {
 		return err
 	}
 	if version == schemaVersion {
-		return s.ensureUsedNames(dataDir)
+		if err := s.ensureUsedNames(dataDir); err != nil {
+			return err
+		}
+		return s.ensureCodeAlerts()
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -252,7 +288,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range usedNamesSchema {
+		for _, stmt := range append(usedNamesSchema, codeAlertsSchema...) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -416,6 +452,36 @@ func insertInvite(tx *sql.Tx, i *Invite) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.Hash, i.CreatedBy, unix(i.Created), unix(i.Expires), i.Admin, i.UsedBy, unix(i.Used))
 	return err
+}
+
+// AddCodeFailure records a wrong 2FA code entered with user's correct
+// password (see codeAlertsSchema).
+func (s *Store) AddCodeFailure(user string) error {
+	_, err := s.db.Exec(`INSERT INTO code_alerts (user, failures, since) VALUES (?, 1, ?)
+		ON CONFLICT (user) DO UPDATE SET failures = failures + 1`, user, time.Now().Unix())
+	return err
+}
+
+// TakeCodeFailures returns and clears the wrong 2FA codes recorded for user:
+// how many, and when the first one was entered. n is 0 if there were none.
+func (s *Store) TakeCodeFailures(user string) (n int, since time.Time, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		var first int64
+		err := tx.QueryRow(`SELECT failures, since FROM code_alerts WHERE user = ?`, user).Scan(&n, &first)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		since = fromUnix(first)
+		_, err = tx.Exec(`DELETE FROM code_alerts WHERE user = ?`, user)
+		return err
+	})
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	return n, since, nil
 }
 
 // NameUsed reports whether name belongs, or once belonged, to an account.

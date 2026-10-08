@@ -75,7 +75,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if passwordOK {
 			s.limiter.fail(userKey)
 			if !errors.Is(err, errCodeReused) {
-				s.alerts.add(name)
+				if err := s.store.AddCodeFailure(name); err != nil {
+					log.Printf("login: recording wrong code of user=%q: %v", name, err)
+				}
 			}
 		}
 		log.Printf("login failed user=%q ip=%s password_ok=%v", name, ip, passwordOK)
@@ -84,12 +86,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.limiter.refund(ipKey)
 	s.limiter.reset(userKey)
+	// Wrong codes entered with the correct password mean someone may know
+	// it: warn the user instead of locking the account (which would let that
+	// person lock the real user out).
 	var notice string
-	if a := s.alerts.take(u.Name); a.n > 0 {
+	failures, since, err := s.store.TakeCodeFailures(u.Name)
+	if err != nil {
+		log.Printf("login: reading wrong codes of user=%q: %v", u.Name, err)
+	}
+	if failures > 0 {
 		notice = fmt.Sprintf("Since %s, %d wrong 2FA code(s) were entered together with your correct password. "+
-			"If that was not you, someone knows your password: change it now.", a.since.UTC().Format("2006-01-02 15:04 MST"), a.n)
+			"If that was not you, someone knows your password: change it now.", since.UTC().Format("2006-01-02 15:04 MST"), failures)
 		next = "/settings/password"
-		log.Printf("login ok user=%q ip=%s after %d wrong code(s) with the correct password", name, ip, a.n)
+		log.Printf("login ok user=%q ip=%s after %d wrong code(s) with the correct password", name, ip, failures)
 	} else {
 		log.Printf("login ok user=%q ip=%s", name, ip)
 	}

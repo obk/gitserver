@@ -264,3 +264,70 @@ func testKey(t *testing.T, comment string) (SSHKey, error) {
 	return SSHKey{ID: account.RandomToken(9), Key: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp))),
 		Fingerprint: ssh.FingerprintSHA256(sp), Comment: comment, Added: time.Now().UTC()}, nil
 }
+
+// Wrong 2FA codes are counted per user until taken, and go with the user.
+func TestCodeAlerts(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.Create(&User{Name: "alice"})
+	s.Create(&User{Name: "bob"})
+	before := time.Now().Add(-time.Second)
+	for range 3 {
+		if err := s.AddCodeFailure("alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _, _ := s.TakeCodeFailures("bob"); n != 0 {
+		t.Fatalf("bob has %d failures", n)
+	}
+	n, since, err := s.TakeCodeFailures("alice")
+	if err != nil || n != 3 || since.Before(before) || since.After(time.Now()) {
+		t.Fatalf("take: %d %v %v", n, since, err)
+	}
+	if n, _, _ := s.TakeCodeFailures("alice"); n != 0 {
+		t.Fatalf("failures not cleared: %d", n)
+	}
+	// Failures belong to the account: deleting it deletes them.
+	s.AddCodeFailure("bob")
+	s.Delete("bob")
+	var rows int
+	s.db.QueryRow(`SELECT count(*) FROM code_alerts`).Scan(&rows)
+	if rows != 0 {
+		t.Fatalf("%d code_alerts rows left after deleting the user", rows)
+	}
+	if err := s.AddCodeFailure("nobody"); err == nil {
+		t.Fatal("failure recorded for a user that does not exist")
+	}
+}
+
+// Databases from before code_alerts get it on open, and the schema version
+// stays the same, so older gitserver versions can still open them.
+func TestCodeAlertsMigration(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "alice"})
+	if _, err := s.db.Exec(`DROP TABLE code_alerts`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.AddCodeFailure("alice"); err != nil {
+		t.Fatalf("table not added on open: %v", err)
+	}
+	var version int
+	s.db.QueryRow(`PRAGMA user_version`).Scan(&version)
+	if version != schemaVersion || schemaVersion != 1 {
+		t.Fatalf("user_version %d (schemaVersion %d): older versions would refuse the database", version, schemaVersion)
+	}
+}
