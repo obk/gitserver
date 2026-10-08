@@ -1,8 +1,8 @@
-// Command wiki turns README.md into GitHub wiki pages: Home (the intro and
+// Command wiki turns WIKI.md into GitHub wiki pages: Home (the intro and
 // a table of contents), one page per "## " section, and a sidebar. Links
 // between sections are pointed at the right page, and links to files in the
 // repository at their GitHub URL. The wiki workflow runs it on every change
-// to the README, so README.md stays the one place to edit.
+// to it, so WIKI.md stays the one place to edit.
 //
 //	go run ./tools/wiki -repo owner/name -branch main -out DIR
 package main
@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	readme := flag.String("readme", "README.md", "the README to split")
+	readme := flag.String("src", "WIKI.md", "the Markdown file to split")
 	out := flag.String("out", "wiki", "directory to write the pages to")
 	repo := flag.String("repo", os.Getenv("GITHUB_REPOSITORY"), "GitHub repository (owner/name), for links to files")
 	branch := flag.String("branch", "main", "branch that links to files point at")
@@ -65,7 +65,7 @@ type page struct {
 // ("" for the page itself).
 type target struct{ file, anchor string }
 
-const footer = "_This page is generated from [README.md](%sREADME.md); edit it there._\n"
+const footer = "_This page is generated from [WIKI.md](%sWIKI.md); edit it there._\n"
 
 // split returns the wiki pages for the README src: Home, one per section,
 // _Sidebar and _Footer.

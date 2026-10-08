@@ -24,7 +24,7 @@ dist:
 bundle: dist
 	rm -rf dist/bundle && mkdir -p dist/bundle
 	cp dist/gitserver-linux-$(ARCH) dist/bundle/gitserver
-	cp -r deploy README.md dist/bundle/
+	cp -r deploy README.md WIKI.md dist/bundle/
 	tar -C dist -czf dist/gitserver-$(VERSION)-linux-$(ARCH).tar.gz bundle
 
 # make deploy HOST=user@vps DOMAIN=git.example.com   first install

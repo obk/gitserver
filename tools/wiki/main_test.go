@@ -46,7 +46,7 @@ func TestSplit(t *testing.T) {
 		},
 		"Admin-tools": {"Back to [repos](Setup-and-use#repositories)."},
 		"_Sidebar":    {"- [Admin tools](Admin-tools)"},
-		"_Footer":     {testURL + "README.md"},
+		"_Footer":     {testURL + "WIKI.md"},
 	} {
 		for _, w := range want {
 			if !strings.Contains(p[file], w) {
@@ -73,9 +73,9 @@ func TestSplitErrors(t *testing.T) {
 	}
 }
 
-// The real README must convert: every anchor link must match a heading.
+// The real WIKI.md must convert: every anchor link must match a heading.
 func TestReadme(t *testing.T) {
-	src, err := os.ReadFile("../../README.md")
+	src, err := os.ReadFile("../../WIKI.md")
 	if err != nil {
 		t.Fatal(err)
 	}

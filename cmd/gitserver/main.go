@@ -656,7 +656,7 @@ var gitserverctl = "/usr/local/sbin/gitserverctl"
 // downloads and installs a release as root.
 func cmdUpdate(args []string) error {
 	if _, err := os.Stat(gitserverctl); err != nil {
-		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see the README's Updating section")
+		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see Updating in WIKI.md")
 	}
 	return syscall.Exec(gitserverctl, append([]string{gitserverctl, "update"}, args...), os.Environ())
 }

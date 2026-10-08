@@ -475,7 +475,9 @@ else
 fi
 put "$HERE/gitserverctl" /usr/local/sbin/gitserverctl 0755 && changed "gitserverctl"
 install -d /usr/local/share/doc/gitserver
-[ -f "$HERE/../README.md" ] && { put "$HERE/../README.md" /usr/local/share/doc/gitserver/README.md 0644 || true; }
+for doc in README.md WIKI.md; do
+	[ -f "$HERE/../$doc" ] && { put "$HERE/../$doc" "/usr/local/share/doc/gitserver/$doc" 0644 || true; }
+done
 sed -e "s|git\.example\.com\"|$SITE_NAME\"|" -e "s|git\.example\.com|$DOMAIN|g" \
 	"$HERE/gitserver.service" >"$TMP/gitserver.service"
 if put "$TMP/gitserver.service" /etc/systemd/system/gitserver.service 0644; then
