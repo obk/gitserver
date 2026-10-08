@@ -158,8 +158,16 @@ func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 		s.handleSummary(w, r, repo)
 	case rest == "log":
 		s.handleLog(w, r, repo)
+	case rest == "log.atom":
+		s.handleLogFeed(w, r, repo)
+	case rest == "tags.atom":
+		s.handleTagsFeed(w, r, repo)
 	case rest == "refs":
 		s.handleRefs(w, r, repo)
+	case rest == "compare":
+		s.handleCompare(w, r, repo)
+	case rest == "search":
+		s.handleSearch(w, r, repo)
 	case rest == "settings":
 		s.handleRepoSettingsForm(w, r, repo)
 	case rest == "tree" || strings.HasPrefix(rest, "tree/"):
@@ -221,6 +229,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, repo *git
 
 type logData struct {
 	Ref     string
+	Feed    string
 	Commits []gitrepo.Commit
 	Prev    string
 	Next    string
@@ -247,7 +256,7 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request, repo *gitrepo
 		s.error(w, r, http.StatusInternalServerError, "Could not read the log.")
 		return
 	}
-	data := logData{Ref: ref, Commits: commits}
+	data := logData{Ref: ref, Commits: commits, Feed: repo.Path() + "/log.atom" + refQuery(ref)}
 	link := func(p int) string {
 		q := url.Values{}
 		if ref != "" {
@@ -282,11 +291,71 @@ type treeData struct {
 	// Blob view
 	IsBlob   bool
 	Name     string
-	Lines    []template.HTML
+	Lines    []codeLine
 	Binary   bool
 	TooLarge bool
 	Size     int64
 	Raw      string
+	// Selected lines (?lines=A or A-B); 0 if none.
+	SelFrom, SelTo int
+	Unselect       string // the page without the selection
+}
+
+// codeLine is one line of a file: its number, a link from the number (see
+// lineLinks), and whether it is selected.
+type codeLine struct {
+	N        int
+	HTML     template.HTML
+	Href     string
+	Selected bool
+}
+
+// parseLines reads a "?lines=" selection: "12" or "12-20" (either order),
+// within 1..n. ok is false for anything else.
+func parseLines(s string, n int) (from, to int, ok bool) {
+	a, b, isRange := strings.Cut(s, "-")
+	from, err1 := strconv.Atoi(a)
+	to, err2 := from, error(nil)
+	if isRange {
+		to, err2 = strconv.Atoi(b)
+	}
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	from, to = min(from, to), max(from, to)
+	if from < 1 || to > n {
+		return 0, 0, false
+	}
+	return from, to, true
+}
+
+// lineLinks makes the line numbers select lines without JavaScript: with
+// nothing or a range selected, a number selects its line; with one line
+// selected, another number selects the range between them, and the
+// selected line's own number clears the selection. The fragment scrolls
+// to the selection.
+func lineLinks(lines []template.HTML, page string, from, to int) []codeLine {
+	sep := "?"
+	if strings.Contains(page, "?") {
+		sep = "&"
+	}
+	out := make([]codeLine, len(lines))
+	for i, html := range lines {
+		n := i + 1
+		href := fmt.Sprintf("%s%slines=%d#L%d", page, sep, n, n)
+		if from != 0 && from == to {
+			switch {
+			case n == from:
+				href = fmt.Sprintf("%s#L%d", page, n)
+			case n < from:
+				href = fmt.Sprintf("%s%slines=%d-%d#L%d", page, sep, n, from, n)
+			default:
+				href = fmt.Sprintf("%s%slines=%d-%d#L%d", page, sep, from, n, from)
+			}
+		}
+		out[i] = codeLine{N: n, HTML: html, Href: href, Selected: n >= from && n <= to}
+	}
+	return out
 }
 
 type treeEntry struct {
@@ -373,10 +442,16 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, repo *gitrep
 		}
 		text := strings.TrimSuffix(string(content), "\n")
 		if text != "" {
-			data.Lines = render.HighlightLines(render.LexerFor(p, text), text, time.Now().Add(render.HighlightBudget))
-			if data.Lines == nil {
-				data.Lines = render.PlainLines(text)
+			lines := render.HighlightLines(render.LexerFor(p, text), text, time.Now().Add(render.HighlightBudget))
+			if lines == nil {
+				lines = render.PlainLines(text)
 			}
+			if sel := r.URL.Query().Get("lines"); sel != "" {
+				data.SelFrom, data.SelTo, _ = parseLines(sel, len(lines))
+			}
+			page := base + render.EscapePath(p) + q
+			data.Unselect = page
+			data.Lines = lineLinks(lines, page, data.SelFrom, data.SelTo)
 		}
 	default:
 		s.notFound(w, r)
@@ -462,6 +537,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, repo *gitr
 
 type refsData struct {
 	Branches, Tags []gitrepo.Ref
+	Default        string
 }
 
 func (s *Server) handleRefs(w http.ResponseWriter, r *http.Request, repo *gitrepo.Repo) {
@@ -470,5 +546,6 @@ func (s *Server) handleRefs(w http.ResponseWriter, r *http.Request, repo *gitrep
 		s.error(w, r, http.StatusInternalServerError, "Could not read refs.")
 		return
 	}
-	s.render(w, http.StatusOK, "refs", s.repoPage(r, repo, "refs", "Refs", refsData{branches, tags}))
+	data := refsData{branches, tags, gitrepo.DefaultBranch(r.Context(), repo.Dir)}
+	s.render(w, http.StatusOK, "refs", s.repoPage(r, repo, "refs", "Refs", data))
 }

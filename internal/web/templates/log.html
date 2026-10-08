@@ -1,4 +1,4 @@
-{{define "content"}}{{with .Data}}{{if .Ref}}<p class="muted">Showing history of <b>{{.Ref}}</b></p>
-{{end}}{{range .Commits}}{{template "event" (ev $.Repo.Path .)}}{{end}}
+{{define "content"}}{{with .Data}}<p class="muted">{{if .Ref}}Showing history of <b>{{.Ref}}</b>. {{end}}<a href="{{.Feed}}">Atom feed</a> of these commits.</p>
+{{range .Commits}}{{template "event" (ev $.Repo.Path .)}}{{end}}
 {{if or .Prev .Next}}<div class="pager">{{if .Prev}}<a class="btn btn-light" href="{{.Prev}}">&larr; Newer</a>{{end}}{{if .Next}}<a class="btn btn-light" href="{{.Next}}">Older &rarr;</a>{{end}}</div>{{end}}
 {{end}}{{end}}

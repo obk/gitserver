@@ -1,0 +1,18 @@
+{{define "content"}}{{with .Data}}<form method="get" action="{{$.Repo.Path}}/compare" class="search-form">
+<label for="from">From</label><input id="from" name="from" value="{{.From}}" list="refs" maxlength="256" required>
+<label for="to">to</label><input id="to" name="to" value="{{.To}}" list="refs" maxlength="256" required>
+<datalist id="refs">{{range .Refs}}<option value="{{.}}">{{end}}</datalist>
+<button type="submit" class="btn">Compare</button>
+</form>
+{{if .Error}}<div class="alert">{{.Error}}</div>
+{{else if .Same}}<div class="notice"><b>{{.From}}</b> and <b>{{.To}}</b> are the same commit.</div>
+{{else if .Comparison}}<p class="muted">{{if .Commits}}{{len .Commits}}{{if .MoreCommits}}+{{end}} commit{{if ne (len .Commits) 1}}s{{end}} on <b>{{.To}}</b> that <b>{{.From}}</b> doesn't have{{else}}<b>{{.To}}</b> has no commits that <b>{{.From}}</b> doesn't have{{end}}{{if .MergeBase}}; the diff is from where they forked (<a class="hash" href="{{$.Repo.Path}}/commit/{{.MergeBase}}">{{short .MergeBase}}</a>) to <b>{{.To}}</b>{{else}}; they have no history in common, so the diff is between the two directly{{end}}. <a href="{{$.Repo.Path}}/compare?from={{.To}}&amp;to={{.From}}">Swap</a></p>
+{{range .Commits}}{{template "event" (ev $.Repo.Path .)}}{{end}}
+{{if .MoreCommits}}<div class="notice">Only the newest 250 commits are listed.</div>{{end}}
+{{if .Stat}}<pre class="diffstat">{{.Stat}}</pre>
+<pre class="diff">{{range .Diff}}<span class="{{.Class}}">{{if .Prefix}}<span class="pfx">{{.Prefix}}</span>{{end}}{{.HTML}}</span>
+{{end}}</pre>
+{{if .Truncated}}<div class="notice">This diff is too large to show completely. Clone the repository to see the full change.</div>{{end}}
+{{else}}<div class="notice">No changes to files.</div>{{end}}
+{{else}}<p class="muted">Pick two branches, tags or commits. The page shows the commits on the second that the first doesn't have, and what they changed, like a pull request.</p>{{end}}
+{{end}}{{end}}

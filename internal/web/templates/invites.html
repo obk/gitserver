@@ -1,16 +1,16 @@
 {{define "content"}}{{with .Data}}<div class="row">
 <section class="col-main">
 <h3>Invites</h3>
-<p>Each invite link creates one account. Anyone with the link can use it until it expires, so send it privately.</p>
+<p>The invites you created. Each invite link creates one account. Anyone with the link can use it until it expires, so send it privately.</p>
 {{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
 {{if .NewLink}}<div class="success">
 <p><b>New invite link.</b> Copy it now; it will not be shown again.</p>
 <pre class="secret">{{.NewLink}}</pre>
 </div>{{end}}
 {{if .Invites}}<table class="list">
-<thead><tr><th>Created</th><th>By</th><th>Role</th><th>Status</th><th></th></tr></thead>
+<thead><tr><th>Created</th><th>Role</th><th>Status</th><th></th></tr></thead>
 <tbody>
-{{range .Invites}}<tr><td><span title="{{datefull .Created}}">{{ago .Created}}</span></td><td>~{{.CreatedBy}}</td><td>{{if .Admin}}admin{{else}}user{{end}}</td>
+{{range .Invites}}<tr><td><span title="{{datefull .Created}}">{{ago .Created}}</span></td><td>{{if .Admin}}admin{{else}}user{{end}}</td>
 <td>{{if .UsedBy}}used by ~{{.UsedBy}}{{else if .Usable $.Data.Now}}<span class="ok">active</span>, expires {{date .Expires}}{{else}}<span class="muted">expired</span>{{end}}</td>
 <td class="actions">{{if not .UsedBy}}<form method="post" action="/settings/invites/revoke" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button type="submit" class="btn btn-danger btn-sm">Revoke</button></form>{{end}}</td></tr>
 {{end}}</tbody>

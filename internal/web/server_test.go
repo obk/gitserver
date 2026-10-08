@@ -574,7 +574,7 @@ func TestInviteExpiryAndRevoke(t *testing.T) {
 		t.Fatal("expired invite accepted")
 	}
 	code, inv, _ := e.s.store.CreateInvite("alice", true, time.Hour)
-	if err := e.s.store.RevokeInvite(inv.ID); err != nil {
+	if err := e.s.store.RevokeInvite(inv.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.s.store.LookupInvite(code); err == nil {
@@ -1153,7 +1153,7 @@ func TestAuditLogPage(t *testing.T) {
 	_, body = e.get(alice, "/settings/invites")
 	csrf := csrfToken(t, body)
 	e.post(alice, "/settings/invites", url.Values{"csrf": {csrf}, "expires": {"1d"}, "admin": {"on"}}, "")
-	invites, _ := e.s.store.Invites()
+	invites, _ := e.s.store.Invites("alice")
 	if len(invites) != 1 {
 		t.Fatalf("%d invites", len(invites))
 	}
@@ -1185,5 +1185,29 @@ func TestAuditLogPage(t *testing.T) {
 	list, _ := e.s.store.AuditLog(10)
 	if len(list) != 4 || list[0].Action != "admin rights given" || list[0].IP != "" || list[3].Actor != "bob" {
 		t.Fatalf("entries: %+v", list)
+	}
+}
+
+// Each admin sees and revokes only the invites they created.
+func TestInvitesPerAdmin(t *testing.T) {
+	e := newTestEnv(t)
+	e.s.store.Update("bob", func(u *store.User) error { u.Admin = true; return nil })
+	_, mine, _ := e.s.store.CreateInvite("alice", false, time.Hour)
+	_, theirs, _ := e.s.store.CreateInvite("bob", true, time.Hour)
+	alice := e.login("alice")
+	_, body := e.get(alice, "/settings/invites")
+	if !strings.Contains(body, mine.ID) || strings.Contains(body, theirs.ID) {
+		t.Fatalf("alice's invite list is not just hers:\n%s", body)
+	}
+	csrf := csrfToken(t, body)
+	if status, _ := e.post(alice, "/settings/invites/revoke", url.Values{"csrf": {csrf}, "id": {theirs.ID}}, ""); status != http.StatusBadRequest {
+		t.Fatalf("revoked another admin's invite: %d", status)
+	}
+	if list, _ := e.s.store.Invites("bob"); len(list) != 1 {
+		t.Fatal("bob's invite is gone")
+	}
+	e.post(alice, "/settings/invites/revoke", url.Values{"csrf": {csrf}, "id": {mine.ID}}, "")
+	if list, _ := e.s.store.Invites(""); len(list) != 1 || list[0].ID != theirs.ID {
+		t.Fatalf("own invite not revoked: %+v", list)
 	}
 }

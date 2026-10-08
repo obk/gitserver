@@ -6,6 +6,11 @@ bots:
   - name: gitserver-git-clone
     path_regex: ^/~[^/]+/[^/]+/(info/refs|git-upload-pack|git-receive-pack)$
     action: ALLOW
+  # Feed readers aren't browsers and can't solve the challenge. A feed is a
+  # few dozen entries, cheap to serve.
+  - name: gitserver-feeds
+    path_regex: ^/~[^/]+/[^/]+/(log|tags)\.atom$
+    action: ALLOW
   - name: gitserver-stylesheet
     path_regex: ^/static/style\.css$
     action: ALLOW

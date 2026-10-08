@@ -846,8 +846,11 @@ func scanInvites(rows *sql.Rows) ([]*Invite, error) {
 
 const inviteColumns = `id, hash, created_by, created, expires, admin, used_by, used`
 
-func (s *Store) Invites() ([]*Invite, error) {
-	rows, err := s.db.Query(`SELECT ` + inviteColumns + ` FROM invites ORDER BY created DESC, id`)
+// Invites returns the invites createdBy made, newest first; all of them if
+// createdBy is "" (the command line).
+func (s *Store) Invites(createdBy string) ([]*Invite, error) {
+	rows, err := s.db.Query(`SELECT `+inviteColumns+` FROM invites WHERE ? = '' OR created_by = ? ORDER BY created DESC, id`,
+		createdBy, createdBy)
 	if err != nil {
 		return nil, err
 	}
@@ -875,8 +878,11 @@ func (s *Store) LookupInvite(code string) (*Invite, error) {
 	return findInvite(s.db, account.HashToken(code))
 }
 
-func (s *Store) RevokeInvite(id string) error {
-	res, err := s.db.Exec(`DELETE FROM invites WHERE id = ? AND used_by = ''`, id)
+// RevokeInvite deletes an unused invite that createdBy made; any unused
+// invite if createdBy is "" (the command line).
+func (s *Store) RevokeInvite(id, createdBy string) error {
+	res, err := s.db.Exec(`DELETE FROM invites WHERE id = ? AND used_by = '' AND (? = '' OR created_by = ?)`,
+		id, createdBy, createdBy)
 	if err != nil {
 		return err
 	}
