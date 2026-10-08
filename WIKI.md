@@ -220,15 +220,23 @@ Re-running `install.sh` (or `make update`) runs as a **quick update** when gitse
 - **no questions:** domain, site name and email are read from the existing setup
 - **no package installs**, unless something is missing
 - **only files whose content changed are replaced**, and **only affected services restart**: gitserver for a new binary or unit, Anubis for a new policy; Caddy is *reloaded* without downtime. If nothing changed, nothing restarts. If an earlier run was interrupted, a re-run finishes the restarts it missed.
-- a **progress bar** for each step, a spinner with the elapsed time while something slow runs (package installs, waiting for a service or the certificate), and a one-line summary:
+- on a terminal, a **live progress line** at the bottom: a spinner, a bar that fills as the steps finish, the current step, and whatever slow thing is running right now with its elapsed time (package installs, service restarts, waiting for the certificate). What each step did scrolls above it, and it ends with how long it took and a short summary:
 
 ```
-[██████████░░░░░░░░] 4/7  Caddy (HTTPS)
+  Caddy (HTTPS)
       · site config unchanged
-...
-Updated git.example.com: gitserver binary.
-  Version:  a1b2c3d -> e4f5a6b
+  Services
+      ✓ restarted gitserver.service (new version)
+  ⠹ ███████████████░░░░░  75%  Services  restarting gitserver.service (1s)
 ```
+```
+  ✓ done in 6s
+
+Updated git.example.com: gitserver binary.
+  Version:  0.1.6-alpha -> 0.1.7-alpha
+```
+
+  Without a terminal (a log file, CI) it prints one plain line per step instead.
 
 Your data, the 2FA key and the Anubis signing key are never touched.
 
@@ -468,7 +476,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L613).
 - **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L595), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
-  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L457), [`run`](deploy/gitserverctl#L18).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L556), [`run`](deploy/gitserverctl#L18).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
   - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L167).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
@@ -518,12 +526,12 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Server
 
 - **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
-- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L578).
+- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L677).
 - **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
-- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L676), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
+- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L775), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
 - **Mirrors can't reach inside your network (SSRF):** since users choose a mirror's URL, a careless fetch could reach services only the server can reach, like `localhost`, your private network or the cloud provider's metadata service (`169.254.169.254`). Mirror sources must be `https://` without credentials; the host name is resolved and every address must be a public internet one; git is then pinned to that checked address (`http.curloptResolve`, git 2.37+), so the name can't be switched to an inside address in between. Redirects, proxies, other protocols and credential helpers are off. The sync runs as its own sandboxed systemd job, not in the web server. Code: [`IsPublic`](internal/outbound/outbound.go#L35), [`syncMirror`](internal/gitrepo/mirror.go#L156), [`curloptResolve`](internal/gitrepo/mirror.go#L180).
 - **Background jobs are sandboxed too:** the repository check has no network at all (`PrivateNetwork=yes`); both jobs run as the `git` user and can only write to `/var/lib/gitserver`. Code: [`PrivateNetwork`](deploy/gitserver-fsck.service#L23), [`RestrictAddressFamilies`](deploy/gitserver-mirror.service#L30).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L447), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L546), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
 
 ---
 

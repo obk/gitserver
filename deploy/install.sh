@@ -35,65 +35,163 @@ BIN=${BIN:-$HERE/../gitserver}
 
 TTY=0
 [ -t 1 ] && TTY=1
-bold() { if [ "$TTY" = 1 ]; then printf '\033[1m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
-info() { printf '      %s\n' "$*"; }
-ok() { if [ "$TTY" = 1 ]; then printf '      \033[32m✓\033[0m %s\n' "$*"; else printf '      ok: %s\n' "$*"; fi; }
-same() { if [ "$TTY" = 1 ]; then printf '      \033[2m· %s\033[0m\n' "$*"; else printf '      unchanged: %s\n' "$*"; fi; }
-die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
-warn() { if [ "$TTY" = 1 ]; then printf '      \033[33m! %s\033[0m\n' "$*" >&2; else printf '      warning: %s\n' "$*" >&2; fi; }
+COLS=$( (stty size </dev/tty) 2>/dev/null | cut -d' ' -f2)
+case "$COLS" in '' | *[!0-9]*) COLS=80 ;; esac
 
-STEP=0
-TOTAL=1
-# step "title": prints a progress bar line, e.g. [████████░░░░░░] 4/7 Caddy
-step() {
-	STEP=$((STEP + 1))
-	if [ "$TTY" = 1 ]; then
-		width=18 filled=$((STEP * 18 / TOTAL)) bar="" i=0
-		while [ "$i" -lt "$width" ]; do
-			if [ "$i" -lt "$filled" ]; then bar="$bar█"; else bar="$bar░"; fi
+# On a terminal, the last line is a live progress line, redrawn in place:
+#   ⠹ ███████████░░░░░░░░░  55%  OpenSSH (git over SSH)  apt-get install … (3s)
+# Everything else is printed above it (say). Without a terminal (logs, CI)
+# there is no progress line and every step is one plain line.
+STEP=0 TOTAL=1 TITLE="" ACT="" ACT_S=0 SHOWN=0 FOOT=0 SPIN_N=0
+LIVE=0 # 1 from the first step until finish: the bar is on screen
+BARW=20
+
+# foot draws the progress line.
+foot() {
+	[ "$TTY" = 1 ] || return 0
+	SPIN_N=$((SPIN_N + 1))
+	case $((SPIN_N % 8)) in
+	0) f='⠋' ;; 1) f='⠙' ;; 2) f='⠹' ;; 3) f='⠸' ;; 4) f='⠼' ;; 5) f='⠴' ;; 6) f='⠦' ;; *) f='⠧' ;;
+	esac
+	line=""
+	if [ "$LIVE" = 1 ]; then
+		bar="" i=0
+		while [ "$i" -lt "$BARW" ]; do
+			if [ "$i" -lt "$SHOWN" ]; then bar="$bar█"; else bar="$bar░"; fi
 			i=$((i + 1))
 		done
-		printf '\033[1m[%s] %d/%d  %s\033[0m\n' "$bar" "$STEP" "$TOTAL" "$*"
+		line=$(printf '\033[32m%s\033[0m %3d%%  \033[1m%.28s\033[0m' "$bar" $((SHOWN * 100 / BARW)) "$TITLE")
+	fi
+	if [ -n "$ACT" ]; then
+		# Keep the line shorter than the terminal: a wrapped line can't be
+		# redrawn in place.
+		room=$((COLS - 66))
+		[ "$LIVE" = 1 ] || room=$((COLS - 16))
+		[ "$room" -lt 8 ] && room=8
+		line="$line$(printf "  \033[2m%.${room}s (%ss)\033[0m" "$ACT" "$ACT_S")"
+	fi
+	printf '\r\033[K  \033[36m%s\033[0m %s' "$f" "$line"
+	FOOT=1
+}
+# unfoot removes the progress line (it comes back with the next foot).
+unfoot() {
+	if [ "$FOOT" = 1 ]; then
+		printf '\r\033[K'
+		FOOT=0
+	fi
+	return 0
+}
+# say FORMAT ARGS...: printf above the progress line.
+say() {
+	unfoot
+	# shellcheck disable=SC2059
+	printf "$@"
+	[ "$LIVE" = 1 ] && foot
+	return 0
+}
+# grow fills the bar up to $1 cells, a cell at a time, so it moves.
+grow() {
+	while [ "$SHOWN" -lt "$1" ]; do
+		SHOWN=$((SHOWN + 1))
+		foot
+		sleep 0.02
+	done
+}
+
+bold() { if [ "$TTY" = 1 ]; then say '\033[1m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
+info() { if [ "$TTY" = 1 ]; then say '      %s\n' "$*"; else printf '      %s\n' "$*"; fi; }
+ok() { if [ "$TTY" = 1 ]; then say '      \033[32m✓\033[0m %s\n' "$*"; else printf '      ok: %s\n' "$*"; fi; }
+same() { if [ "$TTY" = 1 ]; then say '      \033[2m· %s\033[0m\n' "$*"; else printf '      unchanged: %s\n' "$*"; fi; }
+die() {
+	unfoot
+	printf '\nerror: %s\n' "$*" >&2
+	exit 1
+}
+warn() {
+	if [ "$TTY" = 1 ]; then
+		unfoot
+		printf '      \033[33m! %s\033[0m\n' "$*" >&2
+		[ "$LIVE" = 1 ] && foot
+	else
+		printf '      warning: %s\n' "$*" >&2
+	fi
+	return 0
+}
+
+# step "title": starts the next step. On a terminal its title goes above
+# the progress line and the bar slides to the steps done so far.
+step() {
+	STEP=$((STEP + 1)) TITLE=$* ACT="" LIVE=1
+	if [ "$TTY" = 1 ]; then
+		say '  \033[1m%s\033[0m\n' "$*"
+		grow $(((STEP - 1) * BARW / TOTAL))
 	else
 		printf '==> [%d/%d] %s\n' "$STEP" "$TOTAL" "$*"
 	fi
 }
 
-# spin "what" SECONDS: on a terminal, shows that something is still going
-# on: "⠹ what (12s)" on one line, redrawn in place. spin_end clears it.
+# finish fills the bar and replaces the progress line with the time taken.
+finish() {
+	[ "$TTY" = 1 ] || return 0
+	ACT=""
+	grow "$BARW"
+	sleep 0.15
+	unfoot
+	LIVE=0
+	printf '  \033[32m✓\033[0m \033[1mdone\033[0m in %ss\n' $(($(date +%s) - START))
+}
+START=$(date +%s)
+
+# spin "what" SECONDS: shows on the progress line what is going on and for
+# how long. spin_end takes it off again.
 spin() {
 	[ "$TTY" = 1 ] || return 0
-	SPIN_N=$((${SPIN_N:-0} + 1))
-	case $((SPIN_N % 4)) in 0) f='⠋' ;; 1) f='⠙' ;; 2) f='⠸' ;; *) f='⠴' ;; esac
-	printf '\r      \033[36m%s\033[0m %.60s \033[2m(%ss)\033[0m\033[K' "$f" "$1" "$2"
+	ACT=$1 ACT_S=$2
+	foot
 }
-spin_end() { [ "$TTY" = 1 ] && printf '\r\033[K' || true; }
-
-# quiet runs a noisy command with its output in $LOGFILE, with a spinner
-# while it runs; on failure it shows the end of that output and stops.
-quiet() {
-	printf '\n### %s\n' "$*" >>"$LOGFILE"
-	if [ "$TTY" = 1 ]; then
-		# The exit status goes to a file: a finished child stays a zombie
-		# until "wait", so kill -0 can't tell whether it is done.
-		rc=$(mktemp)
-		{
-			"$@" >>"$LOGFILE" 2>&1 && echo 0 >"$rc" || echo 1 >"$rc"
-		} </dev/null &
-		n=0
-		while [ ! -s "$rc" ]; do
-			spin "$*" $((n / 5))
-			sleep 0.2
-			n=$((n + 1))
-		done
-		wait
-		spin_end
-		status=$(cat "$rc")
-		rm -f "$rc"
-		[ "$status" = 0 ] && return 0
-	elif "$@" >>"$LOGFILE" 2>&1; then
-		return 0
+spin_end() {
+	ACT=""
+	if [ "$LIVE" = 1 ]; then
+		[ "$TTY" = 1 ] && [ "$FOOT" = 1 ] && foot
+	else
+		unfoot
 	fi
+	return 0
+}
+
+# busy "what" CMD...: runs CMD with its output in $LOGFILE and, on a
+# terminal, an animated progress line meanwhile. Returns whether it worked.
+busy() {
+	what=$1
+	shift
+	printf '\n### %s\n' "$*" >>"$LOGFILE"
+	if [ "$TTY" != 1 ]; then
+		"$@" >>"$LOGFILE" 2>&1
+		return
+	fi
+	# The exit status goes to a file: a finished child stays a zombie
+	# until "wait", so kill -0 can't tell whether it is done.
+	rc=$(mktemp)
+	{
+		"$@" >>"$LOGFILE" 2>&1 && echo 0 >"$rc" || echo 1 >"$rc"
+	} </dev/null &
+	n=0
+	while [ ! -s "$rc" ]; do
+		spin "$what" $((n / 10))
+		sleep 0.1
+		n=$((n + 1))
+	done
+	wait
+	spin_end
+	status=$(cat "$rc")
+	rm -f "$rc"
+	[ "$status" = 0 ]
+}
+
+# quiet runs a noisy command like busy; on failure it shows the end of its
+# output and stops.
+quiet() {
+	busy "$*" "$@" && return 0
 	tail -n 20 "$LOGFILE" >&2
 	die "'$*' failed (full output: $LOGFILE)"
 }
@@ -107,6 +205,7 @@ if [ -t 0 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
 	INTERACTIVE=1
 fi
 ask() { # ask "question" "default" -> prints the answer
+	unfoot >/dev/tty
 	if [ -n "$2" ]; then
 		printf '%s [%s]: ' "$1" "$2" >/dev/tty
 	else
@@ -691,7 +790,7 @@ if [ "$PKG" = deb ]; then
 		put "$TMP/fail2ban.conf" /etc/fail2ban/jail.d/gitserver.conf 0644 && CH_F2B=1
 		systemctl enable fail2ban.service >>"$LOGFILE" 2>&1 || true
 		if [ "$CH_F2B" = 1 ] || ! systemctl is-active --quiet fail2ban.service; then
-			systemctl restart fail2ban.service >>"$LOGFILE" 2>&1 || true
+			busy "restarting fail2ban" systemctl restart fail2ban.service || true
 		fi
 		i=0
 		until fail2ban-client status sshd >/dev/null 2>&1; do
@@ -727,7 +826,7 @@ systemctl enable gitserver.socket gitserver.service anubis@gitserver.service cad
 systemctl enable --now $JOB_TRIGGERS >>"$LOGFILE" 2>&1 || warn "could not enable $JOB_TRIGGERS; see $LOGFILE"
 RESTARTED=""
 restart() { # restart UNIT REASON
-	systemctl restart "$1" || die "$1 failed to restart; see: journalctl -u $1"
+	busy "restarting $1" systemctl restart "$1" || die "$1 failed to restart; see: journalctl -u $1"
 	ok "restarted $1 ($2)"
 	RESTARTED="$RESTARTED, ${1%.service}"
 }
@@ -746,13 +845,13 @@ has_group() {
 # only applies once the socket is recreated. The loop starts gitserver again.
 if [ "$CH_SOCKET" = 1 ] || ! systemctl is-active --quiet gitserver.socket; then
 	systemctl stop gitserver.service 2>>"$LOGFILE"
-	systemctl restart gitserver.socket || die "gitserver.socket failed to start; see: journalctl -u gitserver.socket"
+	busy "starting gitserver.socket" systemctl restart gitserver.socket || die "gitserver.socket failed to start; see: journalctl -u gitserver.socket"
 	ok "started gitserver.socket (/run/gitserver/http.sock)"
 	RESTARTED="$RESTARTED, gitserver.socket"
 fi
 for unit in gitserver.service anubis@gitserver.service caddy.service; do
 	if ! systemctl is-active --quiet "$unit"; then
-		systemctl start "$unit" || die "$unit failed to start; see: journalctl -u $unit"
+		busy "starting $unit" systemctl start "$unit" || die "$unit failed to start; see: journalctl -u $unit"
 		ok "started $unit"
 		RESTARTED="$RESTARTED, ${unit%.service}"
 		continue
@@ -787,7 +886,7 @@ for unit in gitserver.service anubis@gitserver.service caddy.service; do
 			# the running process does not have yet.
 			restart "$unit" "admin API on a Unix socket"
 		elif [ "$MODE" = install ] || [ "$CH_CADDY" = 1 ]; then
-			systemctl reload caddy.service || die "caddy reload failed; see: journalctl -u caddy"
+			busy "reloading caddy" systemctl reload caddy.service || die "caddy reload failed; see: journalctl -u caddy"
 			ok "reloaded caddy.service (new config, no downtime)"
 			RESTARTED="$RESTARTED, caddy (reload)"
 		else
@@ -842,6 +941,8 @@ cannot be decrypted without it."
 [ "${NEW_KEY:-0}" = 1 ] && KEY_NOTE="NEW: $KEY_NOTE"
 
 # ---------------------------------------------------------------- summary (update)
+
+finish
 
 if [ "$MODE" = update ]; then
 	echo
