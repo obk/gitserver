@@ -211,7 +211,10 @@ func cmdSSHServe(args []string) error {
 		return err
 	}
 	env := []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + os.Getenv("HOME"), "GIT_TERMINAL_PROMPT=0"}
-	if p := os.Getenv("GIT_PROTOCOL"); p == "version=2" || p == "version=1" {
+	// Protocol v2 is not offered: its upload-pack serves any object by
+	// hash, including commits no branch or tag points to any more (a
+	// force-pushed secret). v0/v1 only serve what the refs reach.
+	if p := os.Getenv("GIT_PROTOCOL"); p == "version=1" {
 		env = append(env, "GIT_PROTOCOL="+p)
 	}
 	argv := []string{"git", service}

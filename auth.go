@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -30,56 +31,82 @@ const (
 var b64 = base64.RawStdEncoding
 
 // argonSem bounds concurrent hashes so login floods can't exhaust memory.
+// A request waits at most argonWait for a slot; under a flood the rest are
+// turned away (errHashBusy) instead of queueing without limit.
 var argonSem = make(chan struct{}, 4)
 
+const argonWait = 5 * time.Second
+
+var errHashBusy = errors.New("the server is busy; try again in a moment")
+
+func acquireArgon() bool {
+	select {
+	case argonSem <- struct{}{}:
+		return true
+	case <-time.After(argonWait):
+		return false
+	}
+}
+
 func hashPassword(pw string) (string, error) {
+	if !acquireArgon() {
+		return "", errHashBusy
+	}
+	defer func() { <-argonSem }()
+	return deriveHash(pw)
+}
+
+// deriveHash hashes pw without taking a slot in argonSem.
+func deriveHash(pw string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	argonSem <- struct{}{}
 	key := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
-	<-argonSem
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads,
 		b64.EncodeToString(salt), b64.EncodeToString(key)), nil
 }
 
-func checkPassword(encoded, pw string) bool {
+// checkPassword reports whether pw matches encoded. The error is
+// errHashBusy if no hashing slot became free in time.
+func checkPassword(encoded, pw string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
-		return false
+		return false, nil
 	}
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
-		return false
+		return false, nil
 	}
 	var m, t uint32
 	var p uint8
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
-		return false
+		return false, nil
 	}
 	if m == 0 || m > 1<<20 || t == 0 || t > 16 || p == 0 {
-		return false
+		return false, nil
 	}
 	salt, err := b64.DecodeString(parts[4])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	want, err := b64.DecodeString(parts[5])
 	if err != nil || len(want) == 0 {
-		return false
+		return false, nil
 	}
-	argonSem <- struct{}{}
+	if !acquireArgon() {
+		return false, errHashBusy
+	}
 	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
 	<-argonSem
-	return subtle.ConstantTimeCompare(got, want) == 1
+	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // dummyHash is checked against when a username does not exist, so that
 // response timing does not reveal which usernames are valid.
 var dummyHash = sync.OnceValue(func() string {
-	h, err := hashPassword(randomToken(16))
+	h, err := deriveHash(randomToken(16))
 	if err != nil {
 		panic(err)
 	}
@@ -170,6 +197,7 @@ type session struct {
 	user    string
 	credFP  string // credentialFingerprint at login
 	csrf    string
+	notice  string // security warning shown on the password page
 	created time.Time
 	seen    time.Time
 }
@@ -195,11 +223,11 @@ func credentialFingerprint(u *User) string {
 	return hashToken(u.PasswordHash + "\x00" + u.TOTPSecret)
 }
 
-func (s *sessionStore) create(user, credFP string) string {
+func (s *sessionStore) create(user, credFP, notice string) string {
 	id := randomToken(32)
 	now := time.Now()
 	s.mu.Lock()
-	s.m[hashToken(id)] = &session{user: user, credFP: credFP, csrf: randomToken(32), created: now, seen: now}
+	s.m[hashToken(id)] = &session{user: user, credFP: credFP, csrf: randomToken(32), notice: notice, created: now, seen: now}
 	s.mu.Unlock()
 	return id
 }
@@ -287,6 +315,33 @@ func (l *limiter) blocked(key string) bool {
 	return b.n >= l.max
 }
 
+// take counts an attempt before it is made, so that a burst of parallel
+// requests cannot all pass blocked() before the first failure is recorded.
+// It reports false if key is already blocked. Undo it with refund.
+func (l *limiter) take(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.m[key]
+	if b == nil || time.Since(b.start) > l.window {
+		b = &bucket{start: time.Now()}
+		l.m[key] = b
+	}
+	if b.n >= l.max {
+		return false
+	}
+	b.n++
+	return true
+}
+
+// refund takes back an attempt counted by take.
+func (l *limiter) refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.m[key]; b != nil && b.n > 0 {
+		b.n--
+	}
+}
+
 func (l *limiter) fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -312,6 +367,42 @@ func (l *limiter) gc() {
 			delete(l.m, k)
 		}
 	}
+}
+
+// codeAlerts counts wrong 2FA codes entered after a correct password. Such
+// a failure means someone may know the password, so the user is warned at
+// their next login instead of being locked out (which would let anyone who
+// knows the password lock the real user out). Kept in memory only.
+type codeAlerts struct {
+	mu sync.Mutex
+	m  map[string]codeAlert
+}
+
+type codeAlert struct {
+	n     int
+	since time.Time
+}
+
+func newCodeAlerts() *codeAlerts { return &codeAlerts{m: make(map[string]codeAlert)} }
+
+func (c *codeAlerts) add(user string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a := c.m[user]
+	if a.n == 0 {
+		a.since = time.Now()
+	}
+	a.n++
+	c.m[user] = a
+}
+
+// take returns and clears the failures recorded for user.
+func (c *codeAlerts) take(user string) codeAlert {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a := c.m[user]
+	delete(c.m, user)
+	return a
 }
 
 func constantTimeEqual(a, b string) bool {

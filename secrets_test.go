@@ -121,7 +121,9 @@ func TestLoadSecretBox(t *testing.T) {
 		t.Fatal("credential and env key differ")
 	}
 	// A different key than the one the database was encrypted with is refused.
-	s.Create(&User{Name: "a", TOTPSecret: be.sealTOTP("a", "S")})
+	if err := s.Create(&User{Name: "b", TOTPSecret: be.sealTOTP("b", "S")}); err != nil { // "a" can't be reused
+		t.Fatal(err)
+	}
 	t.Setenv(keyEnv, newKeyHex())
 	if _, err := loadSecretBox(dir, s); !errors.Is(err, errNoKey) || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("wrong key accepted: %v", err)
