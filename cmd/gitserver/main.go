@@ -271,6 +271,11 @@ func cmdUser(args []string) error {
 		if err := st.Create(&store.User{Name: name, PasswordHash: hash, TOTPSecret: box.SealTOTP(name, secret), TOTPLast: step, Admin: *admin, SSHKeys: []store.SSHKey{key}}); err != nil {
 			return err
 		}
+		role := ""
+		if *admin {
+			role = "admin"
+		}
+		cliAudit(st, "user created", name, role)
 		fmt.Printf("User %s created.\n", name)
 	case "passwd":
 		if _, err := st.Get(name); err != nil {
@@ -287,6 +292,7 @@ func cmdUser(args []string) error {
 		if err := st.Update(name, func(u *store.User) error { u.PasswordHash = hash; return nil }); err != nil {
 			return err
 		}
+		cliAudit(st, "password changed", name, "")
 		fmt.Println("Password updated.")
 	case "totp":
 		if _, err := st.Get(name); err != nil {
@@ -304,17 +310,26 @@ func cmdUser(args []string) error {
 		if err := st.Update(name, func(u *store.User) error { u.TOTPSecret, u.TOTPLast = sealed, step; return nil }); err != nil {
 			return err
 		}
+		cliAudit(st, "new authenticator", name, "")
 		fmt.Println("Authenticator updated.")
 	case "admin":
 		val := fs.Arg(1)
 		if val != "true" && val != "false" {
 			return errUsage
 		}
-		return st.Update(name, func(u *store.User) error { u.Admin = val == "true"; return nil })
+		if err := st.Update(name, func(u *store.User) error { u.Admin = val == "true"; return nil }); err != nil {
+			return err
+		}
+		action := "admin rights given"
+		if val == "false" {
+			action = "admin rights removed"
+		}
+		cliAudit(st, action, name, "")
 	case "del":
 		if err := st.Delete(name); err != nil {
 			return err
 		}
+		cliAudit(st, "user deleted", name, "")
 		fmt.Printf("User %s deleted.\n", name)
 	default:
 		return errUsage
@@ -381,6 +396,11 @@ func cmdInvite(args []string) error {
 		if err != nil {
 			return err
 		}
+		detail := "id " + inv.ID + ", expires " + inv.Expires.UTC().Format("2006-01-02 15:04 UTC")
+		if *admin {
+			detail += ", makes an admin"
+		}
+		cliAudit(st, "invite created", "", detail)
 		fmt.Println(strings.TrimRight(*baseURL, "/") + "/signup?code=" + code)
 		fmt.Fprintf(os.Stderr, "Invite %s expires %s. The link is shown only once.\n", inv.ID, inv.Expires.Local().Format(time.DateTime))
 	case "list":
@@ -407,7 +427,10 @@ func cmdInvite(args []string) error {
 		if fs.NArg() != 1 {
 			return errUsage
 		}
-		return st.RevokeInvite(fs.Arg(0))
+		if err := st.RevokeInvite(fs.Arg(0)); err != nil {
+			return err
+		}
+		cliAudit(st, "invite revoked", "", "id "+fs.Arg(0))
 	default:
 		return errUsage
 	}
@@ -436,9 +459,13 @@ func cmdUserKey(st *store.Store, sub string, args []string) error {
 		if err := st.AddSSHKey(name, key); err != nil {
 			return err
 		}
+		cliAudit(st, "SSH key added", name, key.Fingerprint)
 		fmt.Println("Added", key.Fingerprint)
 	case sub == "del" && len(args) == 2:
-		return st.DeleteSSHKey(name, args[1])
+		if err := st.DeleteSSHKey(name, args[1]); err != nil {
+			return err
+		}
+		cliAudit(st, "SSH key deleted", name, "id "+args[1])
 	default:
 		return errUsage
 	}
@@ -597,4 +624,18 @@ func printQR(text string) error {
 	}
 	fmt.Fprint(os.Stderr, b.String())
 	return nil
+}
+
+// cliAudit records a change made with the command line in the audit log
+// that admins see on the web. The actor names the sudo user, if any
+// (gitserverctl keeps SUDO_USER); it is never a user name, which can't
+// contain spaces. A failure is only a warning: the change itself is done.
+func cliAudit(st *store.Store, action, target, detail string) {
+	actor := "command line"
+	if u := os.Getenv("SUDO_USER"); u != "" && u != "root" {
+		actor += " (sudo " + u + ")"
+	}
+	if err := st.Audit(store.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail}); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not write the audit log:", err)
+	}
 }

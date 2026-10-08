@@ -1139,3 +1139,51 @@ func TestSecurityPage(t *testing.T) {
 		t.Fatalf("recovery login recorded as %+v", l)
 	}
 }
+
+func TestAuditLogPage(t *testing.T) {
+	e := newTestEnv(t)
+	bob := e.login("bob")
+	_, body := e.get(bob, "/settings/keys")
+	e.post(bob, "/settings/keys", url.Values{"csrf": {csrfToken(t, body)}, "key": {newTestKey(t) + " second"}}, "198.51.100.7")
+	if status, _ := e.get(bob, "/settings/audit"); status != http.StatusNotFound {
+		t.Fatalf("non-admin reached the audit log: %d", status)
+	}
+
+	alice := e.login("alice")
+	_, body = e.get(alice, "/settings/invites")
+	csrf := csrfToken(t, body)
+	e.post(alice, "/settings/invites", url.Values{"csrf": {csrf}, "expires": {"1d"}, "admin": {"on"}}, "")
+	invites, _ := e.s.store.Invites()
+	if len(invites) != 1 {
+		t.Fatalf("%d invites", len(invites))
+	}
+	e.post(alice, "/settings/invites/revoke", url.Values{"csrf": {csrf}, "id": {invites[0].ID}}, "")
+
+	// The command line writes to the same log.
+	cmd := exec.Command(testBinary, "user", "admin", "-data", e.data, "bob", "true")
+	cmd.Env = append(os.Environ(), "SUDO_USER=carol")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+
+	status, body := e.get(alice, "/settings/audit")
+	if status != 200 {
+		t.Fatalf("audit log: %d\n%s", status, body)
+	}
+	for _, want := range []string{
+		"SSH key added <b>bob</b>", "198.51.100.7",
+		"invite created", "id " + invites[0].ID, "makes an admin", "invite revoked",
+		"command line (sudo carol)", "admin rights given <b>bob</b>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("audit log lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "secret") {
+		t.Error("audit log mentions a private repository")
+	}
+	list, _ := e.s.store.AuditLog(10)
+	if len(list) != 4 || list[0].Action != "admin rights given" || list[0].IP != "" || list[3].Actor != "bob" {
+		t.Fatalf("entries: %+v", list)
+	}
+}

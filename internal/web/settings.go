@@ -46,15 +46,26 @@ func (s *Server) handleKeyAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("ssh key added user=%q fingerprint=%s", currentUser(r).Name, key.Fingerprint)
+	s.audit(r, "SSH key added", currentUser(r).Name, key.Fingerprint)
 	http.Redirect(w, r, "/settings/keys", http.StatusSeeOther)
 }
 
 func (s *Server) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteSSHKey(currentUser(r).Name, r.PostFormValue("id")); err != nil {
+	id := r.PostFormValue("id")
+	fingerprint := ""
+	if u, err := s.store.Get(currentUser(r).Name); err == nil {
+		for _, k := range u.SSHKeys {
+			if k.ID == id {
+				fingerprint = k.Fingerprint
+			}
+		}
+	}
+	if err := s.store.DeleteSSHKey(currentUser(r).Name, id); err != nil {
 		s.keysPage(w, r, http.StatusBadRequest, keysData{Error: capitalize(err.Error()) + "."})
 		return
 	}
 	log.Printf("ssh key deleted user=%q", currentUser(r).Name)
+	s.audit(r, "SSH key deleted", currentUser(r).Name, fingerprint)
 	http.Redirect(w, r, "/settings/keys", http.StatusSeeOther)
 }
 
@@ -128,5 +139,6 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		s.startSession(w, r, u, "")
 	}
 	log.Printf("password changed user=%q", name)
+	s.audit(r, "password changed", name, "")
 	http.Redirect(w, r, "/settings/password?changed=1", http.StatusSeeOther)
 }

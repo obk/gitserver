@@ -274,6 +274,35 @@ var loginsSchema = []string{
 // maxLogins is how many logins are kept per user.
 const maxLogins = 20
 
+// auditSchema is the admin audit log: who changed accounts, invites and
+// account security, from the web UI or the command line. It has no foreign
+// keys, so the record of a deleted user stays. Only the newest maxAudit
+// entries are kept. Added like code_alerts.
+var auditSchema = []string{
+	`CREATE TABLE IF NOT EXISTS audit_log (
+		id     INTEGER PRIMARY KEY,
+		at     INTEGER NOT NULL,
+		actor  TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target TEXT NOT NULL,
+		detail TEXT NOT NULL,
+		ip     TEXT NOT NULL
+	) STRICT`,
+}
+
+// maxAudit is how many audit log entries are kept.
+const maxAudit = 1000
+
+// AuditEntry is one entry of the audit log.
+type AuditEntry struct {
+	At     time.Time
+	Actor  string // the user who did it, or "command line ..." (never a user name)
+	Action string // e.g. "invite created", "user deleted"
+	Target string // the user or invite it was done to
+	Detail string
+	IP     string // empty for the command line
+}
+
 // Login is one successful login.
 type Login struct {
 	At     time.Time
@@ -316,7 +345,10 @@ func (s *Store) migrate(dataDir string) error {
 		if err := s.ensureTable("recovery_codes", recoveryCodesSchema); err != nil {
 			return err
 		}
-		return s.ensureTable("logins", loginsSchema)
+		if err := s.ensureTable("logins", loginsSchema); err != nil {
+			return err
+		}
+		return s.ensureTable("audit_log", auditSchema)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -333,7 +365,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema) {
+		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema, auditSchema) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -597,6 +629,50 @@ func (s *Store) RecentLogins(user string, n int) ([]Login, error) {
 		}
 		l.At = fromUnix(at)
 		list = append(list, l)
+	}
+	return list, rows.Err()
+}
+
+// Audit adds e to the audit log (At defaults to now), keeping only the
+// newest maxAudit entries. Long fields are cut to 200 bytes.
+func (s *Store) Audit(e AuditEntry) error {
+	if e.At.IsZero() {
+		e.At = time.Now()
+	}
+	cut := func(v string) string {
+		if len(v) > 200 {
+			return v[:200]
+		}
+		return v
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO audit_log (at, actor, action, target, detail, ip) VALUES (?, ?, ?, ?, ?, ?)`,
+			e.At.Unix(), cut(e.Actor), cut(e.Action), cut(e.Target), cut(e.Detail), cut(e.IP)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM audit_log WHERE id NOT IN
+			(SELECT id FROM audit_log ORDER BY at DESC, id DESC LIMIT ?)`, maxAudit)
+		return err
+	})
+}
+
+// AuditLog returns up to n audit log entries, newest first.
+func (s *Store) AuditLog(n int) ([]AuditEntry, error) {
+	rows, err := s.db.Query(`SELECT at, actor, action, target, detail, ip FROM audit_log
+		ORDER BY at DESC, id DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		var at int64
+		if err := rows.Scan(&at, &e.Actor, &e.Action, &e.Target, &e.Detail, &e.IP); err != nil {
+			return nil, err
+		}
+		e.At = fromUnix(at)
+		list = append(list, e)
 	}
 	return list, rows.Err()
 }

@@ -157,6 +157,7 @@ func (s *Server) handleRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("recovery codes created user=%q", name)
+	s.audit(r, "new recovery codes", name, "")
 	// Shown by the GET, so reloading the page can't make another set.
 	http.Redirect(w, r, "/settings/2fa", http.StatusSeeOther)
 }
@@ -212,5 +213,6 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		s.startSession(w, r, u, "")
 	}
 	log.Printf("new authenticator user=%q", name)
+	s.audit(r, "new authenticator", name, "")
 	http.Redirect(w, r, "/settings/2fa?totp=1", http.StatusSeeOther)
 }

@@ -434,3 +434,43 @@ func TestLogins(t *testing.T) {
 		t.Fatalf("table not added on open: %v", err)
 	}
 }
+
+func TestAuditLog(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "bob"})
+	start := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for i := range maxAudit + 5 {
+		if err := s.Audit(AuditEntry{At: start.Add(time.Duration(i) * time.Second), Actor: "admin", Action: "invite created", Target: fmt.Sprint(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Audit(AuditEntry{Actor: "admin", Action: "user deleted", Target: "bob", Detail: strings.Repeat("x", 500), IP: "192.0.2.1"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Delete("bob")
+	list, err := s.AuditLog(maxAudit * 2)
+	if err != nil || len(list) != maxAudit {
+		t.Fatalf("%d entries kept, want %d: %v", len(list), maxAudit, err)
+	}
+	if e := list[0]; e.Target != "bob" || e.IP != "192.0.2.1" || len(e.Detail) != 200 || time.Since(e.At) > time.Minute {
+		t.Fatalf("newest entry wrong (or gone with the user): %+v", e)
+	}
+	if list[1].Target != fmt.Sprint(maxAudit+4) || list[maxAudit-1].Target != "6" {
+		t.Fatalf("not newest first, or the wrong ones pruned: %s ... %s", list[1].Target, list[maxAudit-1].Target)
+	}
+	// Databases from before the audit log get it on open.
+	s.db.Exec(`DROP TABLE audit_log`)
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Audit(AuditEntry{Actor: "a", Action: "b"}); err != nil {
+		t.Fatalf("table not added on open: %v", err)
+	}
+}

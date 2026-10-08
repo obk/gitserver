@@ -250,6 +250,11 @@ func (s *Server) handleSignupConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pending.delete(token)
 	log.Printf("signup user=%q invited_by=%q ip=%s", u.Name, u.InvitedBy, ip)
+	detail := "invited by " + u.InvitedBy
+	if u.Admin {
+		detail += ", admin"
+	}
+	s.auditAs(r, u.Name, "signed up", u.Name, detail)
 	id := s.startSession(w, r, u, "")
 	s.recordLogin(id, u.Name, ip, r.UserAgent(), "signup")
 	// Every new account starts with recovery codes, shown once.
