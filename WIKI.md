@@ -281,7 +281,7 @@ The first visit to any page may briefly show Anubis' "Making sure you're not a b
 - **Renaming:** in the settings tab. The old address keeps working: web pages redirect to the new name, HTTPS clones follow the redirect, and SSH tells people the new name, until you make a new repository with the old name. Only people who can see the repository are redirected; for everyone else the old name of a private repository stays "not found", like before. Update your own clones with `git remote set-url origin git@git.example.com:~you/NEWNAME`.
 - **Line links:** click a line number to highlight that line; then click another number to highlight the range between them, and copy the address bar to share it, e.g. `…/tree/main.go?lines=12-20#L12`. Clicking the highlighted line again, or **Clear**, removes the highlight. A plain `#L12` link highlights one line too. It works without JavaScript; each click reloads the page.
 - **Search tab:** finds text in the repository's files with `git grep`, on the default branch, or on a branch or tag with `?h=NAME`. It searches for exactly what you type (no patterns), optionally ignoring case, skips binary files, and links each hit to its line. It shows up to 200 lines, at most 20 per file.
-- **Compare:** on the refs tab, **Compare** (or *compare* next to a branch) shows the commits on one branch, tag or commit that another doesn't have, and the diff from where they forked, like a pull request. `…/compare?from=main&to=feature`.
+- **Compare:** on the refs tab, **Compare** (or *compare* next to a branch) shows the commits on one branch, tag or commit that another doesn't have, and how many lines each file gained and lost since they forked (`+++--`), like a pull request. To see the code changes, open a commit. `…/compare?from=main&to=feature`.
 - **Atom feeds:** subscribe to a repository's commits at `…/~owner/repo/log.atom` (one branch: `log.atom?h=NAME`) and to its tags at `…/~owner/repo/tags.atom`. Each has the newest 30 entries. Feed readers can't log in, so only feeds of public repositories work in them.
 
 ### Cloning and pushing
@@ -522,7 +522,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L87).
 - **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L590), [`sandbox`](internal/web/repos.go#L620), [`Content-Disposition`](internal/web/repos.go#L625), [`RawContentType`](internal/render/markdown.go#L99).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L68).
-- **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L384), [`Compare`](internal/gitrepo/git.go#L450), [`validRev`](internal/gitrepo/git.go#L104).
+- **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L384), [`Compare`](internal/gitrepo/git.go#L449), [`validRev`](internal/gitrepo/git.go#L104).
 - **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
 
 ### Server
@@ -598,7 +598,7 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Log | 50 commits per page |
 | Atom feeds | the newest 30 commits or tags |
 | Search | 200 characters; up to 200 matching lines, at most 20 per file; 1 MiB of `git grep` output; 30 s |
-| Compare | the newest 250 commits; the diff like the commit view |
+| Compare | the newest 250 commits, and the changed files (no diff) |
 | Push size | 1 GiB per push; pushes stop while less than 1 GiB of disk is free |
 | Git over SSH | 4 operations at once per user |
 | HTTPS clone and archive download | 2 at once per client address (IPv6: per /64); 30 min each |

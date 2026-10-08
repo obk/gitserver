@@ -437,16 +437,15 @@ type Comparison struct {
 	Commits     []Commit // in to but not in from, newest first
 	MoreCommits bool     // there are more than maxCompareCommits
 	MergeBase   string   // "" if the two have no history in common
-	Stat        string
-	Diff        []render.DiffLine
-	Truncated   bool
+	Stat        string   // per file: lines added and removed (git diff --stat)
 }
 
 const maxCompareCommits = 250
 
-// Compare lists the commits that to has and from doesn't, and the diff
-// from where they forked (their merge base) to to, like a pull request
-// would show. Without a common ancestor the diff is from from itself.
+// Compare lists the commits that to has and from doesn't, and what they
+// changed per file (a diffstat, not the diff itself), from where they
+// forked (their merge base) to to, like a pull request would. Without a
+// common ancestor it is from from itself.
 func Compare(ctx context.Context, dir, from, to string) (*Comparison, error) {
 	if !HashRe.MatchString(from) || !HashRe.MatchString(to) {
 		return nil, errNotFound
@@ -472,11 +471,5 @@ func Compare(ctx context.Context, dir, from, to string) (*Comparison, error) {
 		return nil, err
 	}
 	c.Stat = strings.TrimRight(string(stat), "\n")
-	patch, truncated, err := runGit(ctx, dir, maxDiffView, append(diffArgs, "--patch", base, to, "--")...)
-	if err != nil {
-		return nil, err
-	}
-	c.Truncated = truncated
-	c.Diff = render.Diff(string(patch), len(patch) <= 1<<20)
 	return c, nil
 }
