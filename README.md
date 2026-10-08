@@ -616,6 +616,8 @@ The input checks that face attackers (SSH command, revisions, tree paths, login 
 git tag 0.0.2 && git push origin 0.0.2
 ```
 
+Or on GitHub: **Actions → release → Run workflow**, enter the version (e.g. `0.0.2`); this tags the latest commit of the branch you pick (normally `main`).
+
 The bundle names don't contain the version, so the `latest/download` links in [Option A](#option-a-download-a-release-recommended) always get the newest release.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs gofmt, `make test` and [govulncheck](https://go.dev/doc/security/vuln/) on every push and pull request. Once a week it also fuzzes every target for 5 minutes and checks for newly published vulnerabilities.
