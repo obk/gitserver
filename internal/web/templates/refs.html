@@ -1,10 +1,10 @@
 {{define "content"}}{{with .Data}}<div class="row">
 <section class="col-main">
-<h3>Branches</h3>
-{{range .Branches}}<div class="ref-item"><a href="{{$.Repo.Path}}/log?h={{.Full}}"><b>{{.Name}}</b></a> <a class="muted" href="{{$.Repo.Path}}/tree?h={{.Full}}">browse</a><span class="spacer"></span><span class="muted" title="{{datefull .Date}}">{{ago .Date}}{{if .Author}} by {{.Author}}{{end}}</span></div>
+<h3>Branches <small class="muted"><a href="{{$.Repo.Path}}/compare">Compare</a></small></h3>
+{{range .Branches}}<div class="ref-item"><a href="{{$.Repo.Path}}/log?h={{.Full}}"><b>{{.Name}}</b></a> <a class="muted" href="{{$.Repo.Path}}/tree?h={{.Full}}">browse</a>{{if and $.Data.Default (ne .Name $.Data.Default)}} <a class="muted" href="{{$.Repo.Path}}/compare?from={{$.Data.Default}}&amp;to={{.Name}}">compare</a>{{end}}<span class="spacer"></span><span class="muted" title="{{datefull .Date}}">{{ago .Date}}{{if .Author}} by {{.Author}}{{end}}</span></div>
 {{else}}<div class="notice">No branches.</div>
 {{end}}
-<h3>Tags</h3>
+<h3>Tags <small class="muted"><a href="{{$.Repo.Path}}/tags.atom">Atom feed</a></small></h3>
 {{range .Tags}}<div class="ref-item"><a href="{{$.Repo.Path}}/log?h={{.Full}}"><b>{{.Name}}</b></a> <a class="muted" href="{{$.Repo.Path}}/tree?h={{.Full}}">browse</a><span class="spacer"></span><span class="muted" title="{{datefull .Date}}">{{ago .Date}}{{if .Author}} by {{.Author}}{{end}}</span></div>
 {{else}}<div class="notice">No tags.</div>
 {{end}}

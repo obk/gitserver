@@ -404,7 +404,7 @@ func cmdInvite(args []string) error {
 		fmt.Println(strings.TrimRight(*baseURL, "/") + "/signup?code=" + code)
 		fmt.Fprintf(os.Stderr, "Invite %s expires %s. The link is shown only once.\n", inv.ID, inv.Expires.Local().Format(time.DateTime))
 	case "list":
-		invites, err := st.Invites()
+		invites, err := st.Invites("")
 		if err != nil {
 			return err
 		}
@@ -427,7 +427,7 @@ func cmdInvite(args []string) error {
 		if fs.NArg() != 1 {
 			return errUsage
 		}
-		if err := st.RevokeInvite(fs.Arg(0)); err != nil {
+		if err := st.RevokeInvite(fs.Arg(0), ""); err != nil {
 			return err
 		}
 		cliAudit(st, "invite revoked", "", "id "+fs.Arg(0))

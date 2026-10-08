@@ -7,6 +7,8 @@
 <title>{{if .Title}}{{.Title}} - {{end}}{{.Site}}</title>
 <link rel="stylesheet" href="/static/style.css?v={{.AssetVer}}">
 <link rel="stylesheet" href="/static/highlight.css?v={{.AssetVer}}">
+{{with .Repo}}<link rel="alternate" type="application/atom+xml" title="{{.FullName}} commits" href="{{.Path}}/log.atom">
+<link rel="alternate" type="application/atom+xml" title="{{.FullName}} tags" href="{{.Path}}/tags.atom">{{end}}
 </head>
 <body>
 <nav class="topbar">
@@ -29,6 +31,7 @@
 <li><a href="{{.Path}}/tree" class="{{if eq $.Tab "tree"}}active{{end}}">tree</a></li>
 <li><a href="{{.Path}}/log" class="{{if eq $.Tab "log"}}active{{end}}">log</a></li>
 <li><a href="{{.Path}}/refs" class="{{if eq $.Tab "refs"}}active{{end}}">refs</a></li>
+<li><a href="{{.Path}}/search" class="{{if eq $.Tab "search"}}active{{end}}">search</a></li>
 {{if $.IsOwner}}<li><a href="{{.Path}}/settings" class="{{if eq $.Tab "settings"}}active{{end}}">settings</a></li>{{end}}
 </ul>
 </div>

@@ -16,7 +16,7 @@ type invitesData struct {
 }
 
 func (s *Server) invitesPage(w http.ResponseWriter, r *http.Request, status int, data invitesData) {
-	list, err := s.store.Invites()
+	list, err := s.store.Invites(currentUser(r).Name)
 	if err != nil {
 		s.error(w, r, http.StatusInternalServerError, "Could not load invites.")
 		return
@@ -56,7 +56,7 @@ func (s *Server) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PostFormValue("id")
-	if err := s.store.RevokeInvite(id); err != nil {
+	if err := s.store.RevokeInvite(id, currentUser(r).Name); err != nil {
 		s.invitesPage(w, r, http.StatusBadRequest, invitesData{Error: "Could not revoke invite."})
 		return
 	}

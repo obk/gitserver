@@ -186,8 +186,19 @@ table.tree .size { text-align: right; color: var(--muted); white-space: nowrap; 
 .code pre { padding: .5rem 0; }
 .code .lineno { text-align: right; padding-left: .75rem; padding-right: .75rem; border-right: 1px solid var(--border); user-select: none; overflow: visible; }
 .code .lineno a { color: var(--muted); }
-.code .lineno a:target { color: var(--fg); background: var(--hl); }
-.code .lines { flex: 1; padding-left: 1rem; padding-right: 1rem; tab-size: 4; }
+.code .lineno a.sel { color: var(--fg); background: var(--hl); }
+.code .lines { flex: 1; tab-size: 4; }
+.code .lines > span { display: inline-block; min-width: 100%; min-height: 1.5em; vertical-align: top; padding: 0 1rem; }
+.code .lines > span.sel, .code .lines > span:target { background: var(--hl); }
+.code .lines > span:target { scroll-margin-top: 4rem; }
+.search-form { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; }
+.search-form input:not([type=checkbox]) { flex: 1 1 12rem; width: auto; }
+.search-form input[type=search] { flex-basis: 20rem; }
+h3 small { font-size: .8rem; font-weight: 400; margin-left: .5rem; }
+.search-form .check { margin: 0; }
+.search-file { margin-bottom: 1rem; }
+mark { background: var(--hl); color: inherit; border-radius: 2px; }
+.selection { padding: .4rem .75rem; font-size: .85rem; color: var(--muted); border-bottom: 1px solid var(--border); }
 
 /* Commit view */
 .diffstat { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: .75rem 1rem; margin-bottom: 1rem; font-size: .8rem; }

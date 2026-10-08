@@ -6,8 +6,9 @@
 <div class="blob-head"><b>{{.Name}}</b> <span class="muted">{{size .Size}}{{if .Lines}}, {{len .Lines}} lines{{end}}</span><span class="spacer"></span><a class="btn btn-light" href="{{.Raw}}">View raw</a></div>
 {{if .TooLarge}}<div class="notice">This file is too large to display.</div>
 {{else if .Binary}}<div class="notice">Binary file not shown.</div>
-{{else}}<div class="code"><pre class="lineno">{{range $i, $l := .Lines}}<a id="L{{inc $i}}" href="#L{{inc $i}}">{{inc $i}}</a>
-{{end}}</pre><pre class="lines">{{range .Lines}}{{.}}
+{{else}}{{if .SelFrom}}<div class="selection">{{if eq .SelFrom .SelTo}}Line {{.SelFrom}} selected; click another line number to select a range.{{else}}Lines {{.SelFrom}}&ndash;{{.SelTo}} selected.{{end}} Copy the address bar to link here. <a href="{{.Unselect}}">Clear</a></div>{{end}}
+<div class="code"><pre class="lineno">{{range .Lines}}<a href="{{.Href}}"{{if .Selected}} class="sel"{{end}}>{{.N}}</a>
+{{end}}</pre><pre class="lines">{{range .Lines}}<span id="L{{.N}}"{{if .Selected}} class="sel"{{end}}>{{.HTML}}</span>
 {{end}}</pre></div>{{end}}
 </div>
 {{else}}<table class="tree">

@@ -257,6 +257,10 @@ The first visit to any page may briefly show Anubis' "Making sure you're not a b
 - **Settings tab** (owner only): change the description or visibility, or **delete** the repository (type its name to confirm; this can't be undone).
 - **Your repos** are listed at `https://git.example.com/~you`. The front page shows your repos plus everyone's public ones.
 - **Browsing:** the web UI shows a summary (latest commits, README rendered from Markdown, clone URLs), file tree, files with line numbers and syntax highlighting, a raw file download, the commit log (50 per page), commits with highlighted diffs, branches and tags.
+- **Line links:** click a line number to highlight that line; then click another number to highlight the range between them, and copy the address bar to share it, e.g. `…/tree/main.go?lines=12-20#L12`. Clicking the highlighted line again, or **Clear**, removes the highlight. A plain `#L12` link highlights one line too. It works without JavaScript; each click reloads the page.
+- **Search tab:** finds text in the repository's files with `git grep`, on the default branch, or on a branch or tag with `?h=NAME`. It searches for exactly what you type (no patterns), optionally ignoring case, skips binary files, and links each hit to its line. It shows up to 200 lines, at most 20 per file.
+- **Compare:** on the refs tab, **Compare** (or *compare* next to a branch) shows the commits on one branch, tag or commit that another doesn't have, and the diff from where they forked, like a pull request. `…/compare?from=main&to=feature`.
+- **Atom feeds:** subscribe to a repository's commits at `…/~owner/repo/log.atom` (one branch: `log.atom?h=NAME`) and to its tags at `…/~owner/repo/tags.atom`. Each has the newest 30 entries. Feed readers can't log in, so only feeds of public repositories work in them.
 
 ### Cloning and pushing
 
@@ -287,7 +291,7 @@ Admins see **Settings → invites**. Create a link valid for 1, 7 or 30 days, op
 2. scans the 2FA QR code and enters one code
 3. is logged in and shown 10 **recovery codes**, once, to save somewhere safe. The account only exists once that code checks out.
 
-Unused invites can be revoked. Usernames are lowercase letters, digits, `-` and `_`, up to 32 characters. About 860 reserved names (`admin`, `root`, `support`, `api`, …) are blocked, so nobody can pose as staff.
+Each admin sees, and can revoke, only the unused invites they created; invites made with `gitserverctl` show up only there. Usernames are lowercase letters, digits, `-` and `_`, up to 32 characters. About 860 reserved names (`admin`, `root`, `support`, `api`, …) are blocked, so nobody can pose as staff.
 
 ### Sessions and logins
 
@@ -346,7 +350,7 @@ Changing a password or 2FA ends all of that user's sessions immediately. Deletin
 ```sh
 sudo gitserverctl invite create -base-url https://git.example.com            # 7 days
 sudo gitserverctl invite create -admin -expires 24h -base-url https://git.example.com
-sudo gitserverctl invite list
+sudo gitserverctl invite list                  # everyone's invites, with who created them
 sudo gitserverctl invite revoke ID
 ```
 
@@ -416,12 +420,12 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 
 | | Anonymous | Logged-in user | Owner |
 |---|---|---|---|
-| Public repo: browse in the web UI | ✔ | ✔ | ✔ |
+| Public repo: browse, search, compare, Atom feeds | ✔ | ✔ | ✔ |
 | Public repo: clone over HTTPS | ✔ | ✔ | ✔ |
 | Public repo: clone over SSH | needs an account | ✔ | ✔ |
-| Private repo: see, browse, clone | ✘ (404) | ✘ (404) | ✔ |
+| Private repo: see, browse, search, feeds, clone | ✘ (404) | ✘ (404) | ✔ |
 | Push, settings, delete | ✘ | ✘ | ✔ |
-| Create invites | ✘ | admins only | (admins only) |
+| Create invites, see and revoke your own | ✘ | admins only | (admins only) |
 
 **Admins have no extra access to repositories.** They can only create invites, and the server operator manages everything else from the command line.
 
@@ -451,7 +455,7 @@ Every claim below links to the code that implements it. On this server and on Gi
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
 - **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L178), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L818), [`RedeemInvite`](internal/store/store.go#L891).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L818), [`RedeemInvite`](internal/store/store.go#L897).
 - **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L633).
 
 ### Git
@@ -466,7 +470,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L144), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L251).
 - **Hardening:**
   - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L39), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L121), [`Command`](internal/gitrepo/git.go#L56).
-  - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](internal/gitrepo/git.go#L179).
+  - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](internal/gitrepo/git.go#L198).
   - web git processes are capped and time out after 30 s Code: [`gitSlots`](internal/gitrepo/git.go#L41), [`Timeout`](internal/gitrepo/git.go#L22).
 - **Limits per account and client,** so one user or address can't fill the disk or take all the capacity:
   - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](internal/sshgit/ssh.go#L152), [`minFreeDisk`](internal/sshgit/ssh.go#L153).
@@ -479,9 +483,10 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L85).
-- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L392), [`sandbox`](internal/web/repos.go#L422), [`Content-Disposition`](internal/web/repos.go#L427), [`RawContentType`](internal/render/markdown.go#L85).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L467), [`sandbox`](internal/web/repos.go#L497), [`Content-Disposition`](internal/web/repos.go#L502), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
-- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Code: [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L22).
+- **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L381), [`Compare`](internal/gitrepo/git.go#L447), [`validRev`](internal/gitrepo/git.go#L104).
+- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
 
 ### Server
 
@@ -552,6 +557,9 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Syntax highlighting | files up to 512 KiB / 2 s; diffs up to 1 MiB |
 | Diff view | up to 2 MiB, then truncated |
 | Log | 50 commits per page |
+| Atom feeds | the newest 30 commits or tags |
+| Search | 200 characters; up to 200 matching lines, at most 20 per file; 1 MiB of `git grep` output; 30 s |
+| Compare | the newest 250 commits; the diff like the commit view |
 | Push size | 1 GiB per push; pushes stop while less than 1 GiB of disk is free |
 | Git over SSH | 4 operations at once per user |
 | HTTPS clone | 2 at once per client address (IPv6: per /64) |
@@ -662,7 +670,7 @@ make bundle       # deploy bundle for ARCH (default amd64)
 | `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
-| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `repos.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
+| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `repos.go`, `search.go`, `compare.go`, `feed.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
 | `deploy/` | installer and server configs |
 | `tools/wiki/` | turns this README into the GitHub wiki |
 | `test/smoke/` | container that acts as a fresh VPS, for testing the installer |

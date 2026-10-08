@@ -170,8 +170,27 @@ func parseUnix(s string) time.Time {
 
 type Commit struct {
 	Hash, Author, Subject string
+	Body                  string // only from Messages
 	Date                  time.Time
 	Files, Add, Del       int
+}
+
+// Messages lists the newest n commits reachable from commit with their
+// full messages, for feeds. No diff stats.
+func Messages(ctx context.Context, dir, commit string, n int) ([]Commit, error) {
+	out, err := gitOutput(ctx, dir, "log", "--no-color", "--format=%x1e%H%x00%an%x00%at%x00%s%x00%b", "-n", strconv.Itoa(n), commit, "--")
+	if err != nil {
+		return nil, err
+	}
+	var commits []Commit
+	for _, rec := range strings.Split(string(out), "\x1e") {
+		f := strings.SplitN(rec, "\x00", 5)
+		if len(f) != 5 {
+			continue
+		}
+		commits = append(commits, Commit{Hash: f[0], Author: f[1], Date: parseUnix(f[2]), Subject: f[3], Body: strings.TrimSpace(f[4])})
+	}
+	return commits, nil
 }
 
 // Log lists commits reachable from commit, optionally only those touching path.
@@ -316,21 +335,22 @@ func ReadCommit(ctx context.Context, dir, hash string) (*CommitInfo, error) {
 
 type Ref struct {
 	Name, Full, Author string
+	Subject            string // of the tag message, or of the commit for a plain tag
 	Date               time.Time
 }
 
 func Refs(ctx context.Context, dir string) (branches, tags []Ref, err error) {
 	out, err := gitOutput(ctx, dir, "for-each-ref", "--sort=-creatordate",
-		"--format=%(refname)%00%(creatordate:unix)%00%(authorname)%(taggername)", "refs/heads", "refs/tags")
+		"--format=%(refname)%00%(creatordate:unix)%00%(authorname)%(taggername)%00%(contents:subject)", "refs/heads", "refs/tags")
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Split(line, "\x00")
-		if len(f) != 3 {
+		if len(f) != 4 {
 			continue
 		}
-		r := Ref{Full: f[0], Date: parseUnix(f[1]), Author: f[2]}
+		r := Ref{Full: f[0], Date: parseUnix(f[1]), Author: f[2], Subject: f[3]}
 		if name, ok := strings.CutPrefix(f[0], "refs/heads/"); ok {
 			r.Name = name
 			branches = append(branches, r)
@@ -340,4 +360,120 @@ func Refs(ctx context.Context, dir string) (branches, tags []Ref, err error) {
 		}
 	}
 	return branches, tags, nil
+}
+
+// A GrepMatch is one line that Grep found.
+type GrepMatch struct {
+	Path string
+	Line int
+	Text string
+}
+
+const (
+	maxGrepPerFile = 20
+	maxGrepOutput  = 1 << 20
+)
+
+// Grep searches the files of commit for the fixed string query (in any
+// case if ignoreCase), skipping binary files, and returns up to max
+// matching lines, at most maxGrepPerFile per file. truncated says there
+// were more.
+func Grep(ctx context.Context, dir, commit, query string, ignoreCase bool, max int) (matches []GrepMatch, truncated bool, err error) {
+	if !HashRe.MatchString(commit) || query == "" || strings.ContainsAny(query, "\x00\n") {
+		return nil, false, errNotFound
+	}
+	// Not --max-count: it needs git 2.38.
+	args := []string{"grep", "--no-color", "-I", "-n", "-z", "--full-name", "-F"}
+	if ignoreCase {
+		args = append(args, "-i")
+	}
+	args = append(args, "-e", query, commit, "--")
+	out, truncated, err := runGit(ctx, dir, maxGrepOutput, args...)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) == 0 {
+		return nil, false, nil // no matches
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	prefix := commit + ":"
+	perFile := map[string]int{}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		f := strings.SplitN(line, "\x00", 3)
+		if len(f) != 3 {
+			continue // empty, or cut off by the output limit
+		}
+		n, err := strconv.Atoi(f[1])
+		if err != nil {
+			continue
+		}
+		path := strings.TrimPrefix(f[0], prefix)
+		if perFile[path]++; perFile[path] > maxGrepPerFile {
+			truncated = true
+			continue
+		}
+		if len(matches) == max {
+			return matches, true, nil
+		}
+		matches = append(matches, GrepMatch{Path: path, Line: n, Text: f[2]})
+	}
+	return matches, truncated, nil
+}
+
+// DefaultBranch is the branch HEAD points to, or "" if it points to none.
+func DefaultBranch(ctx context.Context, dir string) string {
+	out, err := gitOutput(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Comparison is what changed from one commit to another.
+type Comparison struct {
+	Commits     []Commit // in to but not in from, newest first
+	MoreCommits bool     // there are more than maxCompareCommits
+	MergeBase   string   // "" if the two have no history in common
+	Stat        string
+	Diff        []render.DiffLine
+	Truncated   bool
+}
+
+const maxCompareCommits = 250
+
+// Compare lists the commits that to has and from doesn't, and the diff
+// from where they forked (their merge base) to to, like a pull request
+// would show. Without a common ancestor the diff is from from itself.
+func Compare(ctx context.Context, dir, from, to string) (*Comparison, error) {
+	if !HashRe.MatchString(from) || !HashRe.MatchString(to) {
+		return nil, errNotFound
+	}
+	c := &Comparison{}
+	commits, err := Log(ctx, dir, from+".."+to, "", 0, maxCompareCommits+1)
+	if err != nil {
+		return nil, err
+	}
+	if len(commits) > maxCompareCommits {
+		commits, c.MoreCommits = commits[:maxCompareCommits], true
+	}
+	c.Commits = commits
+	base := from
+	if out, err := gitOutput(ctx, dir, "merge-base", from, to); err == nil {
+		c.MergeBase = strings.TrimSpace(string(out))
+		base = c.MergeBase
+	}
+	// See ReadCommit for the flags.
+	diffArgs := []string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M"}
+	stat, _, err := runGit(ctx, dir, 256<<10, append(diffArgs, "--stat=120,80", base, to, "--")...)
+	if err != nil {
+		return nil, err
+	}
+	c.Stat = strings.TrimRight(string(stat), "\n")
+	patch, truncated, err := runGit(ctx, dir, maxDiffView, append(diffArgs, "--patch", base, to, "--")...)
+	if err != nil {
+		return nil, err
+	}
+	c.Truncated = truncated
+	c.Diff = render.Diff(string(patch), len(patch) <= 1<<20)
+	return c, nil
 }

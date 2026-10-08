@@ -1,0 +1,17 @@
+{{define "content"}}{{with .Data}}<form method="get" action="{{$.Repo.Path}}/search" class="search-form">
+<input type="search" name="q" value="{{.Query}}" maxlength="200" placeholder="Search the files{{if .Ref}} of {{.Ref}}{{end}}" aria-label="Search text" required autofocus>
+{{if .Ref}}<input type="hidden" name="h" value="{{.Ref}}">{{end}}
+<label class="check"><input type="checkbox" name="i" value="1"{{if .IgnoreCase}} checked{{end}}> Ignore case</label>
+<button type="submit" class="btn">Search</button>
+</form>
+{{if .Error}}<div class="alert">{{.Error}}</div>
+{{else if .Searched}}{{if .Files}}<p class="muted">{{.Matches}} matching line{{if ne .Matches 1}}s{{end}} in {{len .Files}} file{{if ne (len .Files) 1}}s{{end}}{{if .Ref}} on <b>{{.Ref}}</b>{{end}}.{{if .Truncated}} There are more; only the first are shown (at most 20 per file). Search for something more specific to see the rest.{{end}}</p>
+{{range .Files}}<div class="blob search-file">
+<div class="blob-head"><a href="{{.Href}}"><b>{{.Path}}</b></a></div>
+<div class="code"><pre class="lineno">{{range .Lines}}<a href="{{.Href}}">{{.N}}</a>
+{{end}}</pre><pre class="lines">{{range .Lines}}<span>{{.HTML}}</span>
+{{end}}</pre></div>
+</div>
+{{end}}{{else}}<div class="notice">Nothing found for &ldquo;{{.Query}}&rdquo;{{if .Ref}} on {{.Ref}}{{end}}.</div>{{end}}
+{{else}}<p class="muted">Finds text in the repository's files{{if .Ref}} on <b>{{.Ref}}</b>{{else}} on the default branch{{end}}: exactly what you type, not a pattern. Binary files are skipped.</p>{{end}}
+{{end}}{{end}}
