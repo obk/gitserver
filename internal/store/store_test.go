@@ -331,4 +331,3 @@ func TestCodeAlertsMigration(t *testing.T) {
 		t.Fatalf("user_version %d (schemaVersion %d): older versions would refuse the database", version, schemaVersion)
 	}
 }
-
