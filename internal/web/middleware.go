@@ -64,6 +64,9 @@ func (s *Server) clientIP(r *http.Request) string {
 			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
+	if r.RemoteAddr == "" || r.RemoteAddr == "@" {
+		return "unix" // a Unix socket peer without a proxy header
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

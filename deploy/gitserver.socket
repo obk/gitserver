@@ -1,0 +1,21 @@
+# gitserver's HTTP socket: /etc/systemd/system/gitserver.socket
+#
+# systemd creates the socket and hands it to gitserver (-listen systemd).
+# Only the git user and the gitserver-http group, which holds Caddy and
+# Anubis, may connect: unlike a localhost TCP port, no other local user can
+# reach gitserver and send it a made-up X-Real-IP (client address).
+[Unit]
+Description=gitserver HTTP socket (Caddy and Anubis only)
+Documentation=file:///usr/local/share/doc/gitserver/README.md
+
+[Socket]
+ListenStream=/run/gitserver/http.sock
+SocketUser=git
+SocketGroup=gitserver-http
+SocketMode=0660
+DirectoryMode=0755
+# Delete the socket file when the socket is stopped (e.g. uninstalling).
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
