@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -10,5 +12,15 @@ func TestLoopbackAddr(t *testing.T) {
 		if loopbackAddr(addr) != want {
 			t.Errorf("loopbackAddr(%q) = %v", addr, !want)
 		}
+	}
+}
+
+func TestUpdateHandsOff(t *testing.T) {
+	dir := t.TempDir()
+	old := gitserverctl
+	defer func() { gitserverctl = old }()
+	gitserverctl = filepath.Join(dir, "missing")
+	if err := cmdUpdate(nil); err == nil || !strings.Contains(err.Error(), "install.sh") {
+		t.Fatalf("no helper: %v", err)
 	}
 }

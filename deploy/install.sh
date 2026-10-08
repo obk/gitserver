@@ -56,14 +56,43 @@ step() {
 	fi
 }
 
-# quiet runs a noisy command with its output in $LOGFILE; on failure it
-# shows the end of that output and stops.
+# spin "what" SECONDS: on a terminal, shows that something is still going
+# on: "⠹ what (12s)" on one line, redrawn in place. spin_end clears it.
+spin() {
+	[ "$TTY" = 1 ] || return 0
+	SPIN_N=$((${SPIN_N:-0} + 1))
+	case $((SPIN_N % 4)) in 0) f='⠋' ;; 1) f='⠙' ;; 2) f='⠸' ;; *) f='⠴' ;; esac
+	printf '\r      \033[36m%s\033[0m %.60s \033[2m(%ss)\033[0m\033[K' "$f" "$1" "$2"
+}
+spin_end() { [ "$TTY" = 1 ] && printf '\r\033[K' || true; }
+
+# quiet runs a noisy command with its output in $LOGFILE, with a spinner
+# while it runs; on failure it shows the end of that output and stops.
 quiet() {
 	printf '\n### %s\n' "$*" >>"$LOGFILE"
-	if ! "$@" >>"$LOGFILE" 2>&1; then
-		tail -n 20 "$LOGFILE" >&2
-		die "'$*' failed (full output: $LOGFILE)"
+	if [ "$TTY" = 1 ]; then
+		# The exit status goes to a file: a finished child stays a zombie
+		# until "wait", so kill -0 can't tell whether it is done.
+		rc=$(mktemp)
+		{
+			"$@" >>"$LOGFILE" 2>&1 && echo 0 >"$rc" || echo 1 >"$rc"
+		} </dev/null &
+		n=0
+		while [ ! -s "$rc" ]; do
+			spin "$*" $((n / 5))
+			sleep 0.2
+			n=$((n + 1))
+		done
+		wait
+		spin_end
+		status=$(cat "$rc")
+		rm -f "$rc"
+		[ "$status" = 0 ] && return 0
+	elif "$@" >>"$LOGFILE" 2>&1; then
+		return 0
 	fi
+	tail -n 20 "$LOGFILE" >&2
+	die "'$*' failed (full output: $LOGFILE)"
 }
 
 # ---------------------------------------------------------------- questions
@@ -101,6 +130,12 @@ put() {
 	return 0
 }
 changed() { CHANGED="$CHANGED, $1"; }
+
+# deb_installed PKG: is the package installed? (dpkg -s also succeeds for a
+# removed package whose config files are still there.)
+deb_installed() {
+	[ "$(dpkg-query -W -f '${Status}' "$1" 2>/dev/null)" = "install ok installed" ]
+}
 
 # set_env FILE KEY=VALUE: set KEY in an env file, replacing its line or
 # adding one. Returns success only if FILE changed.
@@ -235,11 +270,15 @@ CERT_STATUS="unknown"
 wait_for_certificate() {
 	i=0
 	while ! https_status; do
-		[ "$i" -ge "$1" ] && return 1
+		[ "$i" -ge "$1" ] && spin_end && return 1
 		[ "$i" -eq 0 ] && info "waiting for the HTTPS certificate (Caddy requests it from Let's Encrypt automatically)..."
-		sleep 5
-		i=$((i + 5))
+		for _ in 1 2 3 4 5; do
+			spin "waiting for the certificate" "$i"
+			sleep 1
+			i=$((i + 1))
+		done
 	done
+	spin_end
 }
 
 # SHA-256 of the official Anubis release packages (from the GitHub release).
@@ -607,7 +646,7 @@ fi
 step "Security updates and SSH protection"
 if [ "$PKG" = deb ]; then
 	if [ "${AUTO_UPDATES:-1}" = 1 ]; then
-		if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+		if ! deb_installed unattended-upgrades; then
 			quiet apt-get install -y -q unattended-upgrades
 			changed "automatic security updates"
 		fi
@@ -626,7 +665,7 @@ if [ "$PKG" = deb ]; then
 		info "automatic security updates skipped (AUTO_UPDATES=0)"
 	fi
 	if [ "${FAIL2BAN:-1}" = 1 ]; then
-		if ! dpkg -s fail2ban >/dev/null 2>&1; then
+		if ! deb_installed fail2ban; then
 			quiet apt-get install -y -q fail2ban python3-systemd nftables
 			changed "fail2ban"
 		fi
@@ -641,8 +680,10 @@ if [ "$PKG" = deb ]; then
 		until fail2ban-client status sshd >/dev/null 2>&1; do
 			i=$((i + 1))
 			[ "$i" -ge 10 ] && break
+			spin "waiting for fail2ban to start" "$i"
 			sleep 1
 		done
+		spin_end
 		if fail2ban-client status sshd >/dev/null 2>&1; then
 			ok "fail2ban guards SSH (port $(ssh_ports | tr ' ' ',')): 5 failed logins in 10 minutes block an address for an hour"
 			[ "$CH_F2B" = 1 ] && changed "fail2ban jail"
@@ -745,18 +786,22 @@ done
 i=0
 until curl -fsS -o /dev/null --max-time 3 --unix-socket /run/gitserver/http.sock http://localhost/static/style.css 2>/dev/null; do
 	i=$((i + 1))
-	[ "$i" -ge 15 ] && die "gitserver does not answer on /run/gitserver/http.sock; see: journalctl -u gitserver"
+	[ "$i" -ge 15 ] && spin_end && die "gitserver does not answer on /run/gitserver/http.sock; see: journalctl -u gitserver"
+	spin "waiting for gitserver to answer" "$i"
 	sleep 1
 done
+spin_end
 # Anubis creates its socket shortly after starting; any HTTP answer will do
 # (it may be a challenge page).
 i=0
 until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --unix-socket /run/anubis/gitserver/anubis.sock \
 	-H 'X-Real-IP: 127.0.0.1' "http://$DOMAIN/" 2>/dev/null)" != 000 ]; do
 	i=$((i + 1))
-	[ "$i" -ge 15 ] && die "Anubis does not answer on /run/anubis/gitserver/anubis.sock; see: journalctl -u anubis@gitserver"
+	[ "$i" -ge 15 ] && spin_end && die "Anubis does not answer on /run/anubis/gitserver/anubis.sock; see: journalctl -u anubis@gitserver"
+	spin "waiting for Anubis to answer" "$i"
 	sleep 1
 done
+spin_end
 for sock in /run/gitserver/http.sock /run/anubis/gitserver/anubis.sock; do
 	[ "$(stat -c %G:%a "$sock")" = gitserver-http:660 ] || warn "$sock is $(stat -c %U:%G/%a "$sock"), expected group gitserver-http, mode 660"
 done

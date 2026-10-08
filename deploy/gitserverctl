@@ -5,6 +5,8 @@
 #   gitserverctl status              are the services running?
 #   gitserverctl logs                follow the logs (Ctrl-C to stop)
 #   gitserverctl restart             restart gitserver, Anubis and Caddy
+#   gitserverctl update [VERSION]    download the newest (or that) release
+#                                    and install it; -f reinstalls the same
 #   gitserverctl user add -admin NAME, repo list, invite create, backup FILE, ...
 #                                    any gitserver command, run as the git user
 set -eu
@@ -24,6 +26,57 @@ run() {
 	exec runuser -u git -- /usr/local/bin/gitserver "$@"
 }
 
+# update downloads a release bundle from GitHub, checks it against the
+# release's SHA256SUMS and runs its installer, which replaces only what
+# changed (see install.sh).
+update() {
+	repo=${GITSERVER_REPO:-obk/gitserver}
+	force=0 version=""
+	for arg; do
+		case "$arg" in
+		-f | --force) force=1 ;;
+		-*) echo "usage: gitserverctl update [-f] [VERSION]" >&2 && exit 2 ;;
+		*) version=$arg ;;
+		esac
+	done
+	case "$(uname -m)" in
+	x86_64) arch=amd64 ;;
+	aarch64) arch=arm64 ;;
+	*) echo "error: no release for $(uname -m)" >&2 && exit 1 ;;
+	esac
+	url="https://github.com/$repo/releases/latest/download"
+	[ -n "$version" ] && url="https://github.com/$repo/releases/download/$version"
+	file="gitserver-linux-$arch.tar.gz"
+
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	cd "$tmp"
+	echo "Downloading ${version:-the latest release} for $arch from github.com/$repo ..."
+	progress=--silent
+	[ -t 2 ] && progress=--progress-bar
+	if ! curl -fL --proto '=https' $progress --show-error -o "$file" "$url/$file" ||
+		! curl -fsSL --proto '=https' -o SHA256SUMS "$url/SHA256SUMS"; then
+		echo "error: download failed${version:+; is $version a release? See https://github.com/$repo/releases}" >&2
+		exit 1
+	fi
+	grep -q "  $file\$" SHA256SUMS || { echo "error: $file is not in the release's SHA256SUMS" >&2 && exit 1; }
+	if ! grep "  $file\$" SHA256SUMS | sha256sum --check --quiet -; then
+		echo "error: checksum mismatch; the download is damaged or was tampered with. Nothing was changed." >&2
+		exit 1
+	fi
+	echo "Checksum OK."
+	tar -xzf "$file"
+	new=$(bundle/gitserver version 2>/dev/null) || { echo "error: the downloaded gitserver doesn't run on this server" >&2 && exit 1; }
+	old=$(/usr/local/bin/gitserver version 2>/dev/null || echo "gitserver (none)")
+	if [ "$new" = "$old" ] && [ "$force" = 0 ]; then
+		echo "Already up to date: ${new#gitserver }. To reinstall it anyway: gitserverctl update -f"
+		exit 0
+	fi
+	echo "Updating ${old#gitserver } -> ${new#gitserver }"
+	echo
+	sh bundle/deploy/install.sh
+}
+
 case "${1:-help}" in
 status)
 	exec systemctl status --no-pager --lines=5 gitserver.socket gitserver.service anubis@gitserver.service caddy.service
@@ -36,8 +89,13 @@ restart)
 	systemctl restart gitserver.service anubis@gitserver.service caddy.service
 	exec systemctl is-active gitserver.service anubis@gitserver.service caddy.service
 	;;
+update)
+	shift
+	update "$@"
+	exit
+	;;
 help | -h | --help)
-	sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
 	echo
 	run help
 	;;
