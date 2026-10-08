@@ -196,6 +196,14 @@ func Delete(reposDir string, r *Repo) error {
 	return os.RemoveAll(r.Dir)
 }
 
+// DeleteOwner deletes every repository of owner, and their folder.
+func DeleteOwner(reposDir, owner string) error {
+	if owner == "" || owner != filepath.Base(owner) || owner == "." || owner == ".." {
+		return errors.New("refusing to delete unexpected path")
+	}
+	return os.RemoveAll(filepath.Join(reposDir, owner))
+}
+
 // ParseRef accepts "~owner/name", "owner/name" and an optional ".git".
 func ParseRef(s string) (owner, name string, err error) {
 	s = strings.TrimSuffix(strings.TrimPrefix(s, "~"), ".git")

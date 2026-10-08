@@ -751,15 +751,22 @@ func (s *Store) Update(name string, fn func(u *User) error) error {
 	})
 }
 
+// Delete removes the user with their SSH keys, login history and recovery
+// codes, and the unused invites they created: a deleted account can't keep
+// inviting people. The name stays taken (see usedNamesSchema). Repositories
+// are not touched.
 func (s *Store) Delete(name string) error {
-	res, err := s.db.Exec(`DELETE FROM users WHERE name = ?`, name)
-	if err != nil {
+	return s.tx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM users WHERE name = ?`, name)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errNoUser
+		}
+		_, err = tx.Exec(`DELETE FROM invites WHERE created_by = ? AND used_by = ''`, name)
 		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errNoUser
-	}
-	return nil
+	})
 }
 
 // UserByKey returns the user owning the key with this fingerprint.

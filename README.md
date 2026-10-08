@@ -308,6 +308,10 @@ Right after you log in, a note at the top of the page shows your previous login.
 
 Both need your current password. Accounts created with `gitserverctl user add` start without recovery codes; make them on this page.
 
+### Deleting your account
+
+At the bottom of **Settings → security**. Type your user name and enter your password and an authenticator (or recovery) code. Your account, SSH keys, unused invites **and all your repositories, private and public, are deleted at once**; this can't be undone, so clone anything you want to keep first. Your user name stays reserved for good, so nobody can take your place. The only admin can't delete their account; make someone else an admin first.
+
 ### Password
 
 **Settings → password.** It needs your current password and a 2FA code, and logs out all your other sessions.
@@ -343,7 +347,7 @@ sudo gitserverctl user key del NAME KEY-ID
 sudo gitserverctl user del NAME                       # delete the account (repos stay on disk)
 ```
 
-Changing a password or 2FA ends all of that user's sessions immediately. Deleting a user revokes their SSH access at once. Their repositories stay in `/var/lib/gitserver/repos/NAME/` until you remove them. A user name can be taken only once: after deletion it stays reserved for good, so nobody can take over the old account's repositories or invites. To give the repositories to someone else, move the folder to their name.
+Changing a password or 2FA ends all of that user's sessions immediately. Deleting a user revokes their SSH access at once and removes their unused invites. Unlike deleting your own account on the web, `user del` keeps their repositories in `/var/lib/gitserver/repos/NAME/` until you remove them. A user name can be taken only once: after deletion it stays reserved for good, so nobody can take over the old account's repositories or invites. To give the repositories to someone else, move the folder to their name.
 
 ### Invites
 
@@ -377,7 +381,7 @@ Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME
 Admins see **Settings → audit log**: who changed what about accounts, invites and account security, when, and from which IP address. It lists:
 
 - invites created and revoked
-- signups, and users created or deleted with `gitserverctl`
+- signups, accounts deleted by their owners, and users created or deleted with `gitserverctl`
 - admin rights given or removed
 - password changes, new authenticators, new recovery codes
 - SSH keys added or deleted
@@ -425,6 +429,7 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 | Public repo: clone over SSH | needs an account | ✔ | ✔ |
 | Private repo: see, browse, search, feeds, clone | ✘ (404) | ✘ (404) | ✔ |
 | Push, settings, delete | ✘ | ✘ | ✔ |
+| Delete the account (with all its repositories) | ✘ | own account only | ✔ |
 | Create invites, see and revoke your own | ✘ | admins only | (admins only) |
 
 **Admins have no extra access to repositories.** They can only create invites, and the server operator manages everything else from the command line.
@@ -453,9 +458,9 @@ Every claim below links to the code that implements it. On this server and on Gi
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L178), [`safeNext`](internal/web/login.go#L17).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L179), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L818), [`RedeemInvite`](internal/store/store.go#L897).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L825), [`RedeemInvite`](internal/store/store.go#L904).
 - **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L633).
 
 ### Git
@@ -670,7 +675,7 @@ make bundle       # deploy bundle for ARCH (default amd64)
 | `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
-| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `repos.go`, `search.go`, `compare.go`, `feed.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
+| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `account.go`, `repos.go`, `search.go`, `compare.go`, `feed.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
 | `deploy/` | installer and server configs |
 | `tools/wiki/` | turns this README into the GitHub wiki |
 | `test/smoke/` | container that acts as a fresh VPS, for testing the installer |

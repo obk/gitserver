@@ -13,6 +13,7 @@ import (
 
 type securityData struct {
 	Error, Notice string
+	DeleteError   string // from deleting the account, shown by its form
 	Sessions      []sessionInfo
 	Logins        []loginRow
 }
