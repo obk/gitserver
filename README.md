@@ -8,7 +8,7 @@ It's a single program that gives you:
 - **git over SSH** for pushing and private repos: `git@git.example.com:~you/project`
 - **read-only HTTPS clone** for public repos: `https://git.example.com/~you/project`
 - **accounts with mandatory two-factor login** (password + authenticator app), invite-only signup, and SSH keys
-- a ready-made **VPS installer** that sets up Caddy (automatic HTTPS), Anubis (bot protection), OpenSSH, the firewall and systemd
+- a ready-made **VPS installer** that sets up Caddy (automatic HTTPS), Anubis (bot protection), OpenSSH, the firewall, automatic security updates, fail2ban and systemd
 
 There's no JavaScript in the web UI and no external services. All data lives on your server.
 
@@ -165,8 +165,13 @@ With `DOMAIN=…` set (as `make deploy` does), it skips the domain questions. Se
 6. Configures **Caddy** for your domain and adds it to the `gitserver-http` group (a systemd drop-in). If `/etc/caddy/Caddyfile` is the distribution's placeholder, it's backed up and replaced with one that imports the gitserver site and moves Caddy's admin API from `127.0.0.1:2019` to a Unix socket only Caddy can open. An existing Caddyfile of your own only gets an `import` line, and the installer tells you how to move the admin API yourself.
 7. Adds **`/etc/ssh/sshd_config.d/50-gitserver.conf`**, a `Match User git` block. It checks the result with `sshd -t` and **rolls back automatically** if sshd rejects it, so it can't break your SSH access.
 8. **Firewall** (see above). Before enabling ufw, it detects every port your SSH server listens on (including custom ports and Ubuntu's `ssh.socket`) and allows those first, so you can't lock yourself out.
-9. Enables and starts everything, then checks that all three services run and that gitserver answers.
-10. Waits up to 2 minutes for the **HTTPS certificate** and reports whether it was issued.
+9. **Security updates and SSH protection** (Debian and Ubuntu):
+   - turns on **automatic security updates** (`unattended-upgrades`, daily). It never reboots on its own; when an update needs a reboot, the login message says so. If you turned them off yourself (`APT::Periodic::Unattended-Upgrade "0"`), the installer leaves that alone and warns.
+   - installs **fail2ban** with a jail for SSH: an address with 5 failed logins within 10 minutes is blocked from your SSH ports for an hour (`/etc/fail2ban/jail.d/gitserver.conf`). It reads sshd's log from the journal and blocks with nftables. Bots guessing passwords on port 22 are the most common attack on any VPS; password logins are already refused for the `git` user, and this keeps the noise and load down for every account.
+
+   Skip either with `AUTO_UPDATES=0` or `FAIL2BAN=0`. On Fedora/RHEL the installer only prints how to set up `dnf-automatic` and fail2ban yourself.
+10. Enables and starts everything, then checks that all three services run and that gitserver answers.
+11. Waits up to 2 minutes for the **HTTPS certificate** and reports whether it was issued.
 
 It ends with a summary: URLs, certificate status, SSH host key fingerprints, and next steps.
 
@@ -361,6 +366,19 @@ Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME
 - Web requests and logins: `journalctl -u gitserver`. Each line has the client IP; failed logins are logged with the IP.
 - Git over SSH, an audit log of every clone, push and rejected command: `journalctl -t gitserver-ssh`.
 - Anubis and Caddy: `journalctl -u anubis@gitserver`, `journalctl -u caddy`, and `/var/log/caddy/gitserver.log`.
+- Blocked SSH addresses: `sudo fail2ban-client status sshd`.
+
+### Audit log
+
+Admins see **Settings → audit log**: who changed what about accounts, invites and account security, when, and from which IP address. It lists:
+
+- invites created and revoked
+- signups, and users created or deleted with `gitserverctl`
+- admin rights given or removed
+- password changes, new authenticators, new recovery codes
+- SSH keys added or deleted
+
+Changes made with `gitserverctl` show up as "command line", with the name of the account that ran `sudo`. Repository events (create, push, delete, public/private) are deliberately **not** in it: an admin must not learn the names of other people's private repositories. Logins are in each user's own [login history](#sessions-and-logins). The last 1000 entries are kept; the page shows the newest 200.
 
 ---
 
@@ -417,23 +435,24 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
 - **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L148).
-- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L568).
-- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L550), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
+- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L600).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L582), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
-  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L413), [`run`](deploy/gitserverctl#L16).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L415), [`run`](deploy/gitserverctl#L16).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
   - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L167).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L504), [`TakeCodeFailures`](internal/store/store.go#L512).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L536), [`TakeCodeFailures`](internal/store/store.go#L544).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L85).
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L177), [`safeNext`](internal/web/login.go#L17).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L178), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L742), [`RedeemInvite`](internal/store/store.go#L815).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L818), [`RedeemInvite`](internal/store/store.go#L891).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L633).
 
 ### Git
 
@@ -458,7 +477,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 ### Web
 
-- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L266), [`tokenClass`](internal/render/highlight.go#L93).
+- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L85).
 - **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L392), [`sandbox`](internal/web/repos.go#L422), [`Content-Disposition`](internal/web/repos.go#L427), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
@@ -467,9 +486,10 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Server
 
 - **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
-- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L520).
+- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L522).
 - **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L403), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
+- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L620), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L405), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
 
 ---
 
@@ -508,6 +528,8 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | `SITE_NAME` | header name (default: domain) |
 | `ACME_EMAIL` | email for Let's Encrypt expiry notices |
 | `ENABLE_UFW=1` | turn on ufw (SSH, 80, 443) without asking |
+| `AUTO_UPDATES=0` | don't turn on automatic security updates |
+| `FAIL2BAN=0` | don't install fail2ban |
 | `RECONFIGURE=1` | full install with questions, even if already installed |
 | `CERT_WAIT_SECONDS` | how long to wait for the certificate (default 120) |
 | `ANUBIS_VERSION`, `ANUBIS_SHA256` | install another Anubis version (needs its checksum) |
@@ -524,6 +546,8 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Signup | 15 minutes between step 1 and the 2FA confirmation |
 | Recovery codes | 10 per account, each usable once |
 | Login history | the last 20 logins per account |
+| Audit log | the last 1000 entries (the page shows 200) |
+| SSH login failures | 5 within 10 min block the address for 1 h (fail2ban) |
 | File view | files up to 1 MiB are shown; larger ones via "View raw" |
 | Syntax highlighting | files up to 512 KiB / 2 s; diffs up to 1 MiB |
 | Diff view | up to 2 MiB, then truncated |
@@ -552,12 +576,14 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | `/run/caddy/admin.sock` | Caddy's admin API (`caddy` only) |
 | `/etc/systemd/system/anubis@gitserver.service.d/gitserver.conf`, `caddy.service.d/gitserver.conf` | drop-ins that add Anubis and Caddy to the `gitserver-http` group |
 | `/etc/ssh/sshd_config.d/50-gitserver.conf` | sshd config for the `git` user |
+| `/etc/fail2ban/jail.d/gitserver.conf` | fail2ban jail for SSH |
+| `/etc/apt/apt.conf.d/20auto-upgrades` | turns on automatic security updates (written only if not already set) |
 | `/etc/anubis/gitserver.env`, `gitserver.botPolicies.yaml` | Anubis config and bot policy |
 | `/etc/caddy/gitserver.caddy` (+ `/etc/caddy/Caddyfile`, see the installer steps) | Caddy site |
 | `/var/log/caddy/gitserver.log` | Caddy access log |
 | `/var/log/gitserver-install.log` | installer log |
 
-Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `gitserverctl`, `install.sh`.
+Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `fail2ban-gitserver.conf`, `gitserverctl`, `install.sh`.
 
 ---
 
@@ -592,6 +618,8 @@ Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`,
 **The page says "Making sure you're not a bot!" and doesn't continue.** That's Anubis. Enable JavaScript for the site once; the cookie lasts 7 days.
 
 **`502 Bad Gateway` or Anubis errors like "permission denied" on a socket.** Caddy or Anubis can't open `/run/gitserver/http.sock` or `/run/anubis/gitserver/anubis.sock`. Run the installer again: it recreates the `gitserver-http` group, the drop-ins and the sockets, and restarts whatever is missing them. To check by hand: `ls -l /run/gitserver/http.sock /run/anubis/gitserver/anubis.sock` (both group `gitserver-http`, `srw-rw----`) and `grep Groups /proc/$(systemctl show -p MainPID --value caddy)/status` (must include the group's ID from `getent group gitserver-http`).
+
+**SSH to the server suddenly times out or says "Connection refused", from one place only.** fail2ban has probably blocked your address after failed logins (often a wrong key or user name, tried a few times). Wait an hour, or connect from elsewhere (or your provider's web console) and run `sudo fail2ban-client status sshd` to see blocked addresses and `sudo fail2ban-client set sshd unbanip YOUR.IP` to unblock. To never block an address, add it to `ignoreip` in `/etc/fail2ban/jail.d/gitserver.conf` and run `sudo systemctl reload fail2ban`; the installer keeps your edit unless the file in `deploy/` changes.
 
 **Anything else:** `sudo gitserverctl status` and `sudo gitserverctl logs`.
 
@@ -631,11 +659,12 @@ make bundle       # deploy bundle for ARCH (default amd64)
 | `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `ssh-keys`, `ssh-serve`) and `demo` |
 | `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
 | `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
-| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history) and loading the 2FA encryption key |
+| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
-| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `invites.go`, `repos.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
+| `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `repos.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
 | `deploy/` | installer and server configs |
+| `tools/wiki/` | turns this README into the GitHub wiki |
 | `test/smoke/` | container that acts as a fresh VPS, for testing the installer |
 | `readme_test.go` | checks the code links in this README |
 
@@ -652,6 +681,8 @@ git tag 0.0.2 && git push origin 0.0.2
 Or on GitHub: **Actions → release → Run workflow**, enter the version (e.g. `0.0.2`); this tags the latest commit of the branch you pick (normally `main`).
 
 The bundle names don't contain the version, so the `latest/download` links in [Option A](#option-a-download-a-release-recommended) always get the newest release.
+
+**Wiki.** The [GitHub wiki](https://github.com/obk/gitserver/wiki) is this README, split into one page per section by `tools/wiki`. `.github/workflows/wiki.yml` publishes it on every push to `main` that changes the README, so edit the README, never the wiki (changes made there are overwritten). Links between sections and to files keep working on the wiki; a link to a heading that doesn't exist fails the build. To see the pages locally: `go run ./tools/wiki -repo obk/gitserver -out /tmp/wiki`. The wiki has to exist before the first run: on GitHub, open the **Wiki** tab and save the first page (any text), then run **Actions → wiki → Run workflow**.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs gofmt, `make test` and [govulncheck](https://go.dev/doc/security/vuln/) on every push and pull request. Once a week it also fuzzes every target for 5 minutes and checks for newly published vulnerabilities.
 

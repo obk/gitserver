@@ -14,6 +14,8 @@
 #
 # Optional: ACME_EMAIL=you@example.com for Let's Encrypt expiry notices,
 #           ENABLE_UFW=1 to turn on ufw (SSH, 80, 443 only) without asking,
+#           AUTO_UPDATES=0 / FAIL2BAN=0 to skip automatic security updates /
+#           fail2ban for SSH (Debian/Ubuntu; both are on by default),
 #           RECONFIGURE=1 to run the full install (with questions) again.
 #
 # It never touches the data in /var/lib/gitserver, the 2FA key in
@@ -333,11 +335,11 @@ if command -v git >/dev/null && command -v caddy >/dev/null && command -v curl >
 fi
 
 if [ "$MODE" = update ]; then
-	TOTAL=7
-	[ "$NEED_PACKAGES" = 1 ] && TOTAL=8
+	TOTAL=8
+	[ "$NEED_PACKAGES" = 1 ] && TOTAL=9
 	bold "Updating gitserver on $DOMAIN (${PREV_VERSION:-?} -> ${NEW_VERSION:-?}); no questions. RECONFIGURE=1 changes settings."
 else
-	TOTAL=10
+	TOTAL=11
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -595,6 +597,67 @@ fi
 if [ "$MODE" = install ]; then
 	step "Firewall"
 	open_firewall
+fi
+
+# ---------------------------------------------------------------- system protection
+
+# Automatic security updates and fail2ban for SSH. Both are left alone if
+# the admin turned them off (AUTO_UPDATES=0, FAIL2BAN=0); on an update they
+# are only installed if missing.
+step "Security updates and SSH protection"
+if [ "$PKG" = deb ]; then
+	if [ "${AUTO_UPDATES:-1}" = 1 ]; then
+		if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+			quiet apt-get install -y -q unattended-upgrades
+			changed "automatic security updates"
+		fi
+		UU=""
+		eval "$(apt-config shell UU APT::Periodic::Unattended-Upgrade)"
+		case "$UU" in
+		1) ok "automatic security updates on (unattended-upgrades, daily, no automatic reboots)" ;;
+		0) warn "automatic updates are turned off in /etc/apt/apt.conf.d (APT::Periodic::Unattended-Upgrade \"0\"); left as they are" ;;
+		*)
+			printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' >/etc/apt/apt.conf.d/20auto-upgrades
+			ok "turned on automatic security updates (unattended-upgrades, daily, no automatic reboots)"
+			changed "automatic security updates"
+			;;
+		esac
+	else
+		info "automatic security updates skipped (AUTO_UPDATES=0)"
+	fi
+	if [ "${FAIL2BAN:-1}" = 1 ]; then
+		if ! dpkg -s fail2ban >/dev/null 2>&1; then
+			quiet apt-get install -y -q fail2ban python3-systemd nftables
+			changed "fail2ban"
+		fi
+		sed "s|@PORTS@|$(ssh_ports | tr ' ' ',')|g" "$HERE/fail2ban-gitserver.conf" >"$TMP/fail2ban.conf"
+		CH_F2B=0
+		put "$TMP/fail2ban.conf" /etc/fail2ban/jail.d/gitserver.conf 0644 && CH_F2B=1
+		systemctl enable fail2ban.service >>"$LOGFILE" 2>&1 || true
+		if [ "$CH_F2B" = 1 ] || ! systemctl is-active --quiet fail2ban.service; then
+			systemctl restart fail2ban.service >>"$LOGFILE" 2>&1 || true
+		fi
+		i=0
+		until fail2ban-client status sshd >/dev/null 2>&1; do
+			i=$((i + 1))
+			[ "$i" -ge 10 ] && break
+			sleep 1
+		done
+		if fail2ban-client status sshd >/dev/null 2>&1; then
+			ok "fail2ban guards SSH (port $(ssh_ports | tr ' ' ',')): 5 failed logins in 10 minutes block an address for an hour"
+			[ "$CH_F2B" = 1 ] && changed "fail2ban jail"
+		else
+			warn "fail2ban did not start; SSH is not protected against password guessing. See: journalctl -u fail2ban"
+		fi
+	else
+		info "fail2ban skipped (FAIL2BAN=0)"
+	fi
+else
+	# Not set up automatically: untested on Fedora/RHEL, where package
+	# names and defaults differ between releases.
+	info "automatic updates and fail2ban are not set up automatically on Fedora/RHEL; to do it yourself:"
+	info "  dnf install dnf-automatic && systemctl enable --now dnf-automatic-install.timer"
+	info "  dnf install fail2ban && systemctl enable --now fail2ban   (then enable the [sshd] jail)"
 fi
 
 # ---------------------------------------------------------------- services
