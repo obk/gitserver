@@ -170,8 +170,9 @@ With `DOMAIN=…` set (as `make deploy` does), it skips the domain questions. Se
    - installs **fail2ban** with a jail for SSH: an address with 5 failed logins within 10 minutes is blocked from your SSH ports for an hour (`/etc/fail2ban/jail.d/gitserver.conf`). It reads sshd's log from the journal and blocks with nftables. Bots guessing passwords on port 22 are the most common attack on any VPS; password logins are already refused for the `git` user, and this keeps the noise and load down for every account.
 
    Skip either with `AUTO_UPDATES=0` or `FAIL2BAN=0`. On Fedora/RHEL the installer only prints how to set up `dnf-automatic` and fail2ban yourself.
-10. Enables and starts everything, then checks that all three services run and that gitserver answers.
-11. Waits up to 2 minutes for the **HTTPS certificate** and reports whether it was issued.
+10. Installs the **background jobs**, systemd timers that run as the `git` user: a weekly `git fsck` of every repository (`gitserver-fsck.timer`) and the pull-mirror sync (`gitserver-mirror.timer` every 15 minutes, and `gitserver-mirror.path` for "Sync now").
+11. Enables and starts everything, then checks that all three services run and that gitserver answers.
+12. Waits up to 2 minutes for the **HTTPS certificate** and reports whether it was issued.
 
 It ends with a summary: URLs, certificate status, SSH host key fingerprints, and next steps.
 
@@ -258,6 +259,7 @@ The first visit to any page may briefly show Anubis' "Making sure you're not a b
 - **At least one key:** you can't delete your last key, and an account without keys is sent to this page after login.
 - **Limit:** up to 20 keys per account.
 - **Instant effect:** deleting a key revokes its SSH access immediately.
+- **Last used:** the list shows when each key last connected (a clone, push or `ssh git@…`), or *never*. A key you don't recognize or haven't used in months is a good one to delete.
 
 ### Repositories
 
@@ -265,6 +267,7 @@ The first visit to any page may briefly show Anubis' "Making sure you're not a b
 - **Settings tab** (owner only): change the description, visibility or protected branches, or **delete** the repository (type its name to confirm; this can't be undone).
 - **Protected branches:** list branches in the settings tab (e.g. `main`, or `release/*`, where `*` matches within one part of the name). Pushes that would delete them or force-push over their commits are refused as a whole, with a message saying why; pushing new commits on top works as usual. Since a force push deletes the dropped commits from the server for good, protect at least your main branch. Tags aren't covered.
 - **Downloads:** any branch or tag as `.tar.gz` or `.zip` (made by `git archive`), from the summary and the refs tab, or at `…/~owner/repo/archive/NAME.tar.gz` (a tag: `archive/refs/tags/v1.0.zip`). The files have one top folder, `repo-NAME/`. Downloads count toward the same limits as HTTPS clones.
+- **Pull mirrors:** fill in **Mirror of** when creating a repository (or in its settings) with a public `https://` URL, e.g. `https://github.com/owner/repo.git`. gitserver copies all its branches and tags and keeps them up to date about every hour; **Sync now** in the settings fetches at once. Branches and tags deleted at the source go away here too, and the default branch follows the source's. Nobody can push to a mirror; clear the field to turn it into an ordinary repository that keeps what it has. Only public sources work (no passwords or tokens), and only on the public internet: addresses in your private network, `localhost` and cloud metadata services are refused, see [Security](#server). If a sync fails, the settings page says why.
 - **Your repos** are listed at `https://git.example.com/~you`. The front page shows your repos plus everyone's public ones.
 - **Browsing:** the web UI shows a summary (latest commits, README rendered from Markdown, clone URLs), file tree, files with line numbers and syntax highlighting, a raw file download, the commit log (50 per page), commits with highlighted diffs, branches and tags.
 - **Line links:** click a line number to highlight that line; then click another number to highlight the range between them, and copy the address bar to share it, e.g. `…/tree/main.go?lines=12-20#L12`. Clicking the highlighted line again, or **Clear**, removes the highlight. A plain `#L12` link highlights one line too. It works without JavaScript; each click reloads the page.
@@ -341,6 +344,7 @@ sudo gitserverctl status     # are gitserver, Anubis and Caddy running?
 sudo gitserverctl logs       # follow all logs (Ctrl-C to stop)
 sudo gitserverctl restart    # restart all three
 sudo gitserverctl update     # install the newest release (see Updating)
+sudo gitserverctl fsck       # check every repository now (also runs weekly)
 sudo gitserverctl help       # list all commands
 ```
 
@@ -386,6 +390,13 @@ Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME
 - Git over SSH, an audit log of every clone, push and rejected command: `journalctl -t gitserver-ssh`.
 - Anubis and Caddy: `journalctl -u anubis@gitserver`, `journalctl -u caddy`, and `/var/log/caddy/gitserver.log`.
 - Blocked SSH addresses: `sudo fail2ban-client status sshd`.
+- Background jobs: `journalctl -u gitserver-fsck` (repository checks) and `journalctl -u gitserver-mirror` (mirror syncs).
+
+### Disk and repository checks
+
+Admins see **Settings → disk**: free space on the server, and the size and number of repositories of each user (without repository names, so private ones stay private), plus the result of the last repository check.
+
+That check is `git fsck` on every repository, run weekly by `gitserver-fsck.timer`, so damage from a failing disk shows up while your snapshots still have a good copy. Each repository is checked while no push to it is running. Damaged ones are listed in `journalctl -u gitserver-fsck`, and the disk page shows how many there are. To check now: `sudo gitserverctl fsck`.
 
 ### Audit log
 
@@ -443,7 +454,7 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 | Delete the account (with all its repositories) | ✘ | own account only | ✔ |
 | Create invites, see and revoke your own | ✘ | admins only | (admins only) |
 
-**Admins have no extra access to repositories.** They can only create invites, and the server operator manages everything else from the command line.
+**Admins have no extra access to repositories.** They can create invites and see the audit log and the disk page, neither of which shows repository names; the server operator manages everything else from the command line.
 
 ---
 
@@ -455,52 +466,52 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
 - **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L148).
-- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L600).
-- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L582), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
+- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L612).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L594), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
-  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L454), [`run`](deploy/gitserverctl#L18).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L457), [`run`](deploy/gitserverctl#L18).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
   - a stolen database or backup holds only ciphertext Code: [`Backup`](internal/store/store.go#L167).
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L536), [`TakeCodeFailures`](internal/store/store.go#L544).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L548), [`TakeCodeFailures`](internal/store/store.go#L556).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L85).
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L179), [`safeNext`](internal/web/login.go#L17).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L181), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L825), [`RedeemInvite`](internal/store/store.go#L904).
-- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L642).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L893), [`RedeemInvite`](internal/store/store.go#L972).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L649).
 
 ### Git
 
-- **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6), [`AuthorizedKeys`](internal/sshgit/ssh.go#L101), [`authorizedKeyLine`](internal/sshgit/ssh.go#L131).
-  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](internal/sshgit/ssh.go#L202), [`sshRepoArgRe`](internal/sshgit/ssh.go#L199), [`Serve`](internal/sshgit/ssh.go#L217), [`syscall.Exec`](internal/sshgit/ssh.go#L291).
+- **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6), [`AuthorizedKeys`](internal/sshgit/ssh.go#L101), [`authorizedKeyLine`](internal/sshgit/ssh.go#L142).
+  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](internal/sshgit/ssh.go#L213), [`sshRepoArgRe`](internal/sshgit/ssh.go#L210), [`Serve`](internal/sshgit/ssh.go#L230), [`syscall.Exec`](internal/sshgit/ssh.go#L313).
   - The sshd config applies only to the `git` user. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6).
   - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](internal/web/server_test.go#L211).
 - **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit and end after 30 minutes, so stalled clients can't hold the slots, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](internal/web/gitclone.go#L30), [`cloneTimeout`](internal/web/gitclone.go#L28), [`gitHTTPRe`](internal/web/gitclone.go#L17), [`cloneSlots`](internal/web/gitclone.go#L20), [`Authorization`](internal/web/gitclone.go#L80).
-- **Removed commits are deleted from disk:** a push that force-pushes over commits, deletes a branch or tag, or moves a tag runs `git gc --prune=now` right after it, so a leaked secret is gone from the server, not just hidden. Normally git would keep such commits for two weeks. The push shows a line saying so and takes a little longer; ordinary pushes don't change. Pushes to the same repository wait for each other, including this cleanup, so it can't delete objects that another push is writing. That's why there's no grace period, which would also have kept the commits of a quick "oops, force-push" alive. Code: [`receivePack`](internal/sshgit/push.go#L34), [`historyRemoved`](internal/sshgit/push.go#L131), [`lockPush`](internal/sshgit/push.go#L94).
+- **Removed commits are deleted from disk:** a push that force-pushes over commits, deletes a branch or tag, or moves a tag runs `git gc --prune=now` right after it, so a leaked secret is gone from the server, not just hidden. Normally git would keep such commits for two weeks. The push shows a line saying so and takes a little longer; ordinary pushes don't change. Pushes to the same repository wait for each other, including this cleanup, so it can't delete objects that another push is writing. That's why there's no grace period, which would also have kept the commits of a quick "oops, force-push" alive. Code: [`receivePack`](internal/sshgit/push.go#L34), [`historyRemoved`](internal/sshgit/push.go#L131), [`LockPush`](internal/sshgit/push.go#L94).
 - **Protected branches and hooks:** every push runs git with `core.hooksPath` set to a temporary folder holding only gitserver's own `pre-receive` hook, so hooks inside a repository folder never run. That hook refuses the whole push, before any ref changes, if it deletes a protected branch or moves one to a commit that doesn't contain the old one. Code: [`hookDir`](internal/sshgit/hook.go#L33), [`PreReceive`](internal/sshgit/hook.go#L63), [`IsProtected`](internal/gitrepo/protect.go#L73).
-- **Unreachable commits are never served:** commits no branch or tag reaches (in repositories from before the cleanup above, or if it failed) are not shown. The web UI only shows reachable commits, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. Code: [`reachable`](internal/gitrepo/git.go#L146), [`Git-Protocol`](internal/web/gitclone.go#L82), [`version=1`](internal/sshgit/ssh.go#L275).
-- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L150), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L251).
+- **Unreachable commits are never served:** commits no branch or tag reaches (in repositories from before the cleanup above, or if it failed) are not shown. The web UI only shows reachable commits, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. Code: [`reachable`](internal/gitrepo/git.go#L146), [`Git-Protocol`](internal/web/gitclone.go#L82), [`version=1`](internal/sshgit/ssh.go#L297).
+- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L208), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L269).
 - **Hardening:**
-  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L40), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L127), [`Command`](internal/gitrepo/git.go#L56).
+  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L41), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L185), [`Command`](internal/gitrepo/git.go#L56).
   - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](internal/gitrepo/git.go#L198).
   - web git processes are capped and time out after 30 s Code: [`gitSlots`](internal/gitrepo/git.go#L41), [`Timeout`](internal/gitrepo/git.go#L22).
 - **Limits per account and client,** so one user or address can't fill the disk or take all the capacity:
-  - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](internal/sshgit/ssh.go#L152), [`minFreeDisk`](internal/sshgit/ssh.go#L153).
-  - each user runs at most 4 git operations over SSH at once. The count is kept in lock files that git holds until it exits, so crashed processes free their slot Code: [`MaxGitPerUser`](internal/sshgit/ssh.go#L154), [`AcquireUserSlot`](internal/sshgit/ssh.go#L165).
+  - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](internal/sshgit/ssh.go#L166), [`minFreeDisk`](internal/sshgit/ssh.go#L167).
+  - each user runs at most 4 git operations over SSH at once. The count is kept in lock files that git holds until it exits, so crashed processes free their slot Code: [`MaxGitPerUser`](internal/sshgit/ssh.go#L168), [`AcquireUserSlot`](internal/sshgit/ssh.go#L179).
   - each client address (IPv6: each /64) runs at most 2 HTTPS clones or archive downloads at once Code: [`clonesPerIP`](internal/web/gitclone.go#L24).
-  - each user can create at most 100 repositories in the web UI; the command line isn't limited Code: [`maxReposPerUser`](internal/web/repos.go#L35).
+  - each user can create at most 100 repositories in the web UI; the command line isn't limited Code: [`maxReposPerUser`](internal/web/repos.go#L36).
   - to change a limit, edit the constant and rebuild.
 
 ### Web
 
 - **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
 - **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L86).
-- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L477), [`sandbox`](internal/web/repos.go#L507), [`Content-Disposition`](internal/web/repos.go#L512), [`RawContentType`](internal/render/markdown.go#L85).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L535), [`sandbox`](internal/web/repos.go#L565), [`Content-Disposition`](internal/web/repos.go#L570), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
 - **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L381), [`Compare`](internal/gitrepo/git.go#L447), [`validRev`](internal/gitrepo/git.go#L104).
 - **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
@@ -508,10 +519,12 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Server
 
 - **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L24).
-- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L563).
+- **No network ports besides SSH, HTTP and HTTPS:** gitserver, Anubis, Anubis' metrics and Caddy's admin API all use Unix sockets. Code: [`ListenStream`](deploy/gitserver.socket#L12), [`BIND`](deploy/anubis.env#L9), [`METRICS_BIND`](deploy/anubis.env#L16), [`admin unix`](deploy/install.sh#L578).
 - **Other users on the server can't fake a client address:** gitserver takes the client IP from Caddy's `X-Real-IP` header, for rate limits and logs. On a localhost port, any local user could connect and send their own. The sockets are mode `0660` and owned by the `gitserver-http` group, which holds only Caddy and Anubis. Caddy's admin API is on a socket only the `caddy` user can open, so its configuration can't be changed to forward a fake header either. Code: [`SocketGroup`](deploy/gitserver.socket#L14), [`SOCKET_MODE`](deploy/anubis.env#L11), [`SupplementaryGroups`](deploy/caddy-gitserver.conf#L11), [`Group`](deploy/anubis-gitserver.conf#L7), [`systemdListener`](cmd/gitserver/listen.go#L62).
-- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L661), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L444), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
+- **Automatic security updates and fail2ban** (Debian/Ubuntu): `unattended-upgrades` installs security fixes daily, and fail2ban blocks addresses that keep failing SSH logins. Code: [`20auto-upgrades`](deploy/install.sh#L676), [`[sshd]`](deploy/fail2ban-gitserver.conf#L11).
+- **Mirrors can't reach inside your network (SSRF):** since users choose a mirror's URL, a careless fetch could reach services only the server can reach, like `localhost`, your private network or the cloud provider's metadata service (`169.254.169.254`). Mirror sources must be `https://` without credentials; the host name is resolved and every address must be a public internet one; git is then pinned to that checked address (`http.curloptResolve`, git 2.37+), so the name can't be switched to an inside address in between. Redirects, proxies, other protocols and credential helpers are off. The sync runs as its own sandboxed systemd job, not in the web server. Code: [`IsPublic`](internal/outbound/outbound.go#L35), [`syncMirror`](internal/gitrepo/mirror.go#L156), [`curloptResolve`](internal/gitrepo/mirror.go#L180).
+- **Background jobs are sandboxed too:** the repository check has no network at all (`PrivateNetwork=yes`); both jobs run as the `git` user and can only write to `/var/lib/gitserver`. Code: [`PrivateNetwork`](deploy/gitserver-fsck.service#L23), [`RestrictAddressFamilies`](deploy/gitserver-mirror.service#L30).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L447), [`0o600`](internal/store/store.go#L118), [`secure_delete`](internal/store/store.go#L125).
 
 ---
 
@@ -582,6 +595,7 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | HTTPS clone and archive download | 2 at once per client address (IPv6: per /64); 30 min each |
 | Protected branches | 20 names or patterns per repository |
 | Repositories | 100 per user from the web UI (the command line isn't limited) |
+| Mirrors | synced about hourly (checked every 15 min); 10 min per sync; paused while less than 1 GiB of disk is free |
 
 ---
 
@@ -595,8 +609,11 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | `/var/lib/gitserver/gitserver.db` | SQLite database (+ `-wal`, `-shm`) |
 | `/var/lib/gitserver/repos/OWNER/NAME.git` | bare repositories |
 | `/var/lib/gitserver/intro.md` | optional landing page text |
+| `/var/lib/gitserver/fsck-status.json`, `mirror-sync-now` | result of the last repository check; touched to start a mirror sync |
+| `/var/lib/gitserver/repos/OWNER/NAME.git/gitserver-*` | per-repository settings: protected branches, mirror source and its last sync |
 | `/etc/gitserver/secret.key` | 2FA encryption key (root, `0600`) |
 | `/etc/systemd/system/gitserver.service`, `gitserver.socket` | systemd unit and the socket it listens on |
+| `/etc/systemd/system/gitserver-fsck.{service,timer}`, `gitserver-mirror.{service,timer,path}` | background jobs: weekly `git fsck`, mirror sync |
 | `/run/gitserver/http.sock` | gitserver's socket (`git:gitserver-http`, `0660`) |
 | `/run/anubis/gitserver/anubis.sock`, `metrics.sock` | Anubis' sockets (group `gitserver-http`, `0660`) |
 | `/run/caddy/admin.sock` | Caddy's admin API (`caddy` only) |
@@ -609,7 +626,7 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | `/var/log/caddy/gitserver.log` | Caddy access log |
 | `/var/log/gitserver-install.log` | installer log |
 
-Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `fail2ban-gitserver.conf`, `gitserverctl`, `install.sh`.
+Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`, `sshd-gitserver.conf`, `gitserver.caddy`, `anubis.env`, `anubis.botPolicies.yaml`, `anubis-gitserver.conf`, `caddy-gitserver.conf`, `fail2ban-gitserver.conf`, `gitserver-fsck.*`, `gitserver-mirror.*`, `gitserverctl`, `install.sh`.
 
 ---
 
@@ -654,12 +671,14 @@ Source files in `deploy/` map to these: `gitserver.service`, `gitserver.socket`,
 ## Uninstalling
 
 ```sh
-sudo systemctl disable --now gitserver.socket gitserver anubis@gitserver
+sudo systemctl disable --now gitserver.socket gitserver anubis@gitserver \
+  gitserver-fsck.timer gitserver-mirror.timer gitserver-mirror.path
 sudo rm /etc/ssh/sshd_config.d/50-gitserver.conf && sudo systemctl try-reload-or-restart ssh   # 'sshd' on Fedora
 sudo rm /etc/caddy/gitserver.caddy /etc/systemd/system/caddy.service.d/gitserver.conf
 # In /etc/caddy/Caddyfile, remove the "import /etc/caddy/gitserver.caddy" line and the
 # "{ admin unix//run/caddy/admin.sock }" block (the original, if any, is Caddyfile.orig.*).
-sudo rm -r /etc/systemd/system/gitserver.service /etc/systemd/system/gitserver.socket \
+sudo rm -r /etc/systemd/system/gitserver.service /etc/systemd/system/gitserver.socket /etc/systemd/system/gitserver-fsck.* \
+  /etc/systemd/system/gitserver-mirror.* \
   /etc/systemd/system/anubis@gitserver.service.d /usr/local/bin/gitserver /usr/local/sbin/gitserverctl
 sudo systemctl daemon-reload && sudo systemctl restart caddy && sudo groupdel gitserver-http
 # Data and keys; back them up first if you want to keep them:
@@ -682,11 +701,12 @@ make bundle       # deploy bundle for ARCH (default amd64)
 
 | Folder | What |
 |---|---|
-| `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `ssh-keys`, `ssh-serve`) and `demo` |
+| `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `update`, `ssh-keys`, `ssh-serve`, the background jobs `fsck` and `mirror-sync`, and the pre-receive hook) and `demo` |
 | `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
 | `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
 | `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
-| `internal/gitrepo/` | repositories on disk and the git commands that read them |
+| `internal/outbound/` | which addresses the server may connect to for users (mirrors) |
+| `internal/gitrepo/` | repositories on disk and the git commands that read them; protected branches, mirrors, `git fsck`, disk usage |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
 | `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `twofactor.go`, `security.go`, `invites.go`, `audit.go`, `account.go`, `repos.go`, `search.go`, `compare.go`, `feed.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
 | `deploy/` | installer and server configs |
@@ -732,6 +752,7 @@ podman exec -e DOMAIN=localhost gs sh /tmp/b/deploy/install.sh
 - **No HTTPS cloning of private repositories:** that would need HTTPS credentials. Private repos are SSH-only.
 - **Restarts log everyone out:** sessions are kept in memory. (Warnings about wrong 2FA codes are kept in the database and survive restarts.)
 - **Not in the web UI:** issues, pull requests, CI and webhooks. This is a git host, not a forge.
+- **Mirrors are one-way and public-only:** they pull from a public https repository; mirroring private sources or pushing to other servers isn't supported.
 - **Manual recovery:** a lost password needs the server admin (`gitserverctl user passwd`), and so does a lost phone once all recovery codes are used up (`gitserverctl user totp`).
 
 ## Credits

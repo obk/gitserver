@@ -136,8 +136,12 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d B", n)
 	case n < 1024*1024:
 		return fmt.Sprintf("%.1f KiB", float64(n)/1024)
-	default:
+	case n < 1024*1024*1024:
 		return fmt.Sprintf("%.1f MiB", float64(n)/(1024*1024))
+	case n < 1024*1024*1024*1024:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1024*1024*1024))
+	default:
+		return fmt.Sprintf("%.1f TiB", float64(n)/(1024*1024*1024*1024))
 	}
 }
 
