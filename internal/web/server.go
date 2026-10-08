@@ -44,7 +44,6 @@ type Server struct {
 	sessions *sessionStore
 	limiter  *limiter
 	clones   *counter // HTTPS clones running per client (ipKey)
-	alerts   *codeAlerts
 	pending  *pendingSignups
 	box      *account.SecretBox // encrypts TOTP secrets
 	reposDir string
@@ -76,7 +75,6 @@ func NewServer(cfg Config) (*Server, error) {
 		sessions: newSessionStore(),
 		limiter:  newLimiter(10, 15*time.Minute),
 		clones:   &counter{m: make(map[string]int)},
-		alerts:   newCodeAlerts(),
 		pending:  newPendingSignups(),
 		reposDir: filepath.Join(cfg.DataDir, "repos"),
 		gitPath:  gitPath,

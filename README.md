@@ -399,7 +399,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Accounts
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
-- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L105).
+- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L114).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
   - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L413), [`run`](deploy/gitserverctl#L16).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
@@ -407,14 +407,14 @@ Every claim below links to the code that implements it. On this server and on Gi
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L156).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. Code: [`codeAlerts`](internal/web/ratelimit.go#L103), [`alerts.take`](internal/web/login.go#L88).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L239), [`AddCodeFailure`](internal/store/store.go#L459), [`TakeCodeFailures`](internal/store/store.go#L467).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L51).
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L195).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L17).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L47), [`withSession`](internal/web/session.go#L120).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L210), [`NewCrossOriginProtection`](internal/web/server.go#L170), [`safeNext`](internal/web/login.go#L17).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L210), [`NewCrossOriginProtection`](internal/web/server.go#L168), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L181), [`ErrNameUsed`](internal/store/store.go#L65).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L559), [`RedeemInvite`](internal/store/store.go#L632).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L625), [`RedeemInvite`](internal/store/store.go#L698).
 
 ### Git
 
@@ -609,7 +609,7 @@ make bundle       # deploy bundle for ARCH (default amd64)
 | `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `ssh-keys`, `ssh-serve`) and `demo` |
 | `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
 | `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
-| `internal/store/` | the SQLite database (users, SSH keys, invites, used names) and loading the 2FA encryption key |
+| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings) and loading the 2FA encryption key |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |
 | `internal/web/` | the web UI: routes (`server.go`), pages by feature (`home.go`, `login.go`, `signup.go`, `settings.go`, `invites.go`, `repos.go`), HTTPS clone (`gitclone.go`), sessions, rate limits, and the embedded `templates/` and `static/` CSS |
@@ -651,7 +651,7 @@ podman exec -e DOMAIN=localhost gs sh /tmp/b/deploy/install.sh
 
 - **No collaborators:** only a repository's owner can push.
 - **No HTTPS cloning of private repositories:** that would need HTTPS credentials. Private repos are SSH-only.
-- **Restarts log everyone out:** sessions are kept in memory.
+- **Restarts log everyone out:** sessions are kept in memory. (Warnings about wrong 2FA codes are kept in the database and survive restarts.)
 - **Not in the web UI:** issues, pull requests, CI and webhooks. This is a git host, not a forge.
 - **Manual recovery:** a lost password or phone needs the server admin (`gitserverctl user passwd/totp`).
 

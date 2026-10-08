@@ -712,6 +712,8 @@ func TestUnreachableCommits(t *testing.T) {
 }
 
 // Wrong 2FA codes after a correct password are reported at the next login.
+// Wrong 2FA codes after a correct password are reported at the next login,
+// even if the server restarted in between.
 func TestCodeFailureNotice(t *testing.T) {
 	e := newTestEnv(t)
 	jar, _ := cookiejar.New(nil)
@@ -720,6 +722,15 @@ func TestCodeFailureNotice(t *testing.T) {
 		e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {"000000"}}, "")
 	}
 	e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"wrong-password-x"}, "code": {"000000"}}, "")
+	// A restart (or a crash) between the attack and the next login must not
+	// hide it: the counts are in the database.
+	s2, err := NewServer(e.s.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.Close()
+	e.s, e.srv = s2, httptest.NewServer(s2.Handler())
+	t.Cleanup(e.srv.Close)
 	status, body := e.post(c, "/login", url.Values{"username": {"alice"}, "password": {"alice-password-123"}, "code": {e.code("alice")}}, "")
 	if status != 200 || !strings.Contains(body, "2 wrong 2FA code(s)") || !strings.Contains(body, "change it now") {
 		t.Fatalf("no notice after wrong codes (%d):\n%s", status, body)
