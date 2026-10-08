@@ -53,6 +53,8 @@ Usage:
   gitserver ssh-serve USER                            forced command for SSH keys
   gitserver backup FILE                               consistent snapshot of the database
   gitserver demo [-listen ADDR]                       throwaway local server with sample data
+  gitserver update [-f] [VERSION]                     on an installed server: download the newest
+                                                      release and install it (runs gitserverctl update)
   gitserver version
 
 Every command accepts -data DIR (default: $GITSERVER_DATA or ./data).
@@ -82,6 +84,8 @@ func main() {
 		err = cmdDemo(os.Args[2:])
 	case "backup":
 		err = cmdBackup(os.Args[2:])
+	case "update":
+		err = cmdUpdate(os.Args[2:])
 	case "version":
 		fmt.Println("gitserver", version)
 	case "help", "-h", "-help", "--help":
@@ -638,4 +642,16 @@ func cliAudit(st *store.Store, action, target, detail string) {
 	if err := st.Audit(store.AuditEntry{Actor: actor, Action: action, Target: target, Detail: detail}); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not write the audit log:", err)
 	}
+}
+
+// gitserverctl is the admin helper the installer puts on the server.
+var gitserverctl = "/usr/local/sbin/gitserverctl"
+
+// cmdUpdate hands "gitserver update" to "gitserverctl update", which
+// downloads and installs a release as root.
+func cmdUpdate(args []string) error {
+	if _, err := os.Stat(gitserverctl); err != nil {
+		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see the README's Updating section")
+	}
+	return syscall.Exec(gitserverctl, append([]string{gitserverctl, "update"}, args...), os.Environ())
 }
