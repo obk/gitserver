@@ -1,3 +1,5 @@
 /gitserver
 /data/
 /go-git-server
+/dist/
+/cmd/gitserver/gitserver

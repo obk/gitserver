@@ -9,7 +9,7 @@ DOMAIN  ?=
 .PHONY: build test dist bundle deploy update clean
 
 build:
-	go build -trimpath -ldflags '$(LDFLAGS)' -o gitserver .
+	go build -trimpath -ldflags '$(LDFLAGS)' -o gitserver ./cmd/gitserver
 
 test:
 	go vet ./...
@@ -17,8 +17,8 @@ test:
 
 dist:
 	mkdir -p dist
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/gitserver-linux-amd64 .
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/gitserver-linux-arm64 .
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/gitserver-linux-amd64 ./cmd/gitserver
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/gitserver-linux-arm64 ./cmd/gitserver
 
 # A self-contained directory to copy to the server.
 bundle: dist
