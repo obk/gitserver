@@ -446,6 +446,12 @@ func TestMirrorSettings(t *testing.T) {
 	}
 	repoDir := gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "m")
 	trigger := filepath.Join(e.data, gitrepo.MirrorTriggerFile)
+	// Repository lists mark it too.
+	for _, page := range []string{"/~alice", "/"} {
+		if _, body := e.get(alice, page); !strings.Contains(body, `~alice/m</a> <span class="badge">mirror</span>`) {
+			t.Errorf("%s doesn't mark the mirror", page)
+		}
+	}
 	r, _ := gitrepo.Load(filepath.Join(e.data, "repos"), "alice", "m")
 	if r.Mirror != "https://github.com/obk/gitserver.git" || !gitrepo.MirrorDue(r, time.Now()) {
 		t.Fatalf("mirror not set up: %+v", r)
