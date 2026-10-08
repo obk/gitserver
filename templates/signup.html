@@ -1,0 +1,32 @@
+{{define "content"}}{{with .Data}}<div class="narrow">
+<h3>Create an account</h3>
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+{{if .Invalid}}{{if not .Error}}<p>Registration on this server is invite-only. Ask an administrator for an invite link.</p>{{end}}
+{{else if eq .Step 1}}<p class="muted">Step 1 of 2: choose your username, password and SSH key.</p>
+<form method="post" action="/signup" class="form">
+<input type="hidden" name="code" value="{{.Code}}">
+<label for="username">Username</label>
+<input id="username" name="username" value="{{.Name}}" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" required autofocus>
+<small class="muted">Lowercase letters, digits, - and _.</small>
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+<label for="password2">Repeat password</label>
+<input id="password2" name="password2" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+<small class="muted">At least 12 characters. A passphrase or a password manager is best.</small>
+<label for="key">SSH public key</label>
+<textarea id="key" name="key" rows="4" placeholder="ssh-ed25519 AAAA... you@laptop" spellcheck="false" required>{{.Key}}</textarea>
+<small class="muted">Git uses SSH. Paste <code>~/.ssh/id_ed25519.pub</code>; no key yet? Run <code>ssh-keygen -t ed25519</code>.</small>
+<button type="submit" class="btn">Continue &rarr;</button>
+</form>
+{{else}}<p class="muted">Step 2 of 2: set up two-factor authentication for <b>~{{.Username}}</b>.</p>
+<p>Scan this code with an authenticator app (Aegis, 2FAS, Google Authenticator, 1Password, ...):</p>
+<div class="qr-box">{{.QR}}</div>
+<details><summary>Can't scan it? Enter the key manually</summary><pre class="secret">{{.Secret}}</pre><small class="muted">TOTP, SHA-1, 6 digits, 30 seconds</small></details>
+<form method="post" action="/signup/confirm" class="form">
+<input type="hidden" name="token" value="{{.Token}}">
+<label for="totp">Code from the app</label>
+<input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123456" required autofocus>
+<button type="submit" class="btn">Create account &rarr;</button>
+</form>
+<p class="muted">This step expires after 15 minutes.</p>
+{{end}}</div>{{end}}{{end}}

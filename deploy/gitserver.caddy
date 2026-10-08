@@ -1,0 +1,38 @@
+# Caddy site for gitserver. install.sh replaces git.example.com with $DOMAIN.
+#
+#   browser       ─▶ Caddy :443 (TLS) ─▶ Anubis 127.0.0.1:8923 ─▶ gitserver 127.0.0.1:8080
+#   git clone     ─▶ Caddy :443 (TLS) ──────────────────────────▶ gitserver (read-only, public repos)
+#   git push/pull ─▶ OpenSSH :22 (user "git", see sshd-gitserver.conf)
+#
+# Git clients cannot solve Anubis challenges, so the smart-HTTP clone
+# endpoints bypass it. gitserver only serves public repos there, read-only.
+
+git.example.com {
+	# acme-email (install.sh puts "tls you@example.com" here if an email is set)
+
+	@gitclone path_regexp gitclone ^/~[^/]+/[^/]+/(info/refs|git-upload-pack|git-receive-pack)$
+	handle @gitclone {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+		}
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8923 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Http-Version {http.request.proto}
+			header_up X-TLS-SNI-Name {http.request.tls.server_name}
+		}
+	}
+
+	header -Server
+
+	log {
+		output file /var/log/caddy/gitserver.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+	}
+}

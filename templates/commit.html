@@ -1,0 +1,11 @@
+{{define "content"}}{{with .Data}}<div class="event">
+<div class="event-meta"><span class="hash">{{.Hash}}</span></div>
+<div class="event-meta"><b>{{.Author}}</b> &lt;{{.Email}}&gt; <span class="muted" title="{{datefull .Date}}">{{ago .Date}}</span></div>
+<pre class="msg">{{.Message}}</pre>
+<div class="event-foot">{{range .Parents}}<span>parent <a class="hash" href="{{$.Repo.Path}}/commit/{{.}}">{{short .}}</a></span>{{end}}<a href="{{$.Repo.Path}}/tree?h={{.Hash}}">browse tree &rarr;</a></div>
+</div>
+{{if .Stat}}<pre class="diffstat">{{.Stat}}</pre>{{end}}
+<pre class="diff">{{range .Diff}}<span class="{{.Class}}">{{if .Prefix}}<span class="pfx">{{.Prefix}}</span>{{end}}{{.HTML}}</span>
+{{end}}</pre>
+{{if .Truncated}}<div class="notice">This diff is too large to show completely. Clone the repository to see the full change.</div>{{end}}
+{{end}}{{end}}

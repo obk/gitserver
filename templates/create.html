@@ -1,0 +1,16 @@
+{{define "content"}}{{with .Data}}<div class="narrow-left">
+<h3>New repository</h3>
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+<form method="post" action="/create" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="name">Name</label>
+<input id="name" name="name" value="{{.Name}}" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,99}" spellcheck="false" autocapitalize="none" required autofocus>
+<small class="muted">Will be <code>~{{$.User.Name}}/NAME</code>. Letters, digits, . _ and -.</small>
+<label for="description">Description <span class="muted">(optional)</span></label>
+<input id="description" name="description" value="{{.Description}}" maxlength="200">
+<label>Visibility</label>
+<label class="check"><input type="radio" name="visibility" value="private"{{if not .Public}} checked{{end}}> Private: only you can see it</label>
+<label class="check"><input type="radio" name="visibility" value="public"{{if .Public}} checked{{end}}> Public: anyone can browse it</label>
+<button type="submit" class="btn">Create repository &rarr;</button>
+</form>
+</div>{{end}}{{end}}

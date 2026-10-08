@@ -1,0 +1,12 @@
+{{define "content"}}{{with .Data}}<div class="row">
+<aside class="col-side">
+{{if .Owner}}<h3>~{{.Owner}}</h3>
+<p class="muted">{{len .Repos}} {{if eq (len .Repos) 1}}repository{{else}}repositories{{end}}{{if and $.User (ne $.User.Name .Owner)}} you can see{{end}}</p>
+{{else}}<h3>{{$.Site}}</h3>
+<p class="muted">Your repositories and everyone's public ones.</p>{{end}}
+{{if or (not .Owner) (and $.User (eq $.User.Name .Owner))}}<p><a class="btn" href="/create">New repository &rarr;</a></p>{{end}}
+</aside>
+<section class="col-main">
+{{range .Repos}}{{template "repo-item" .}}{{else}}<div class="notice">No repositories yet.</div>
+{{end}}</section>
+</div>{{end}}{{end}}

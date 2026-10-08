@@ -1,0 +1,18 @@
+{{define "content"}}{{with .Data}}<div class="tree-head">
+<div class="crumbs">{{range $i, $c := .Crumbs}}{{if $i}} / {{end}}<a href="{{$c.Href}}">{{$c.Name}}</a>{{end}}{{if .Ref}} <span class="badge">{{.Ref}}</span>{{end}}</div>
+{{with .Last}}<div class="last-commit"><a class="hash" href="{{$.Repo.Path}}/commit/{{.Hash}}">{{short .Hash}}</a> <span class="subject">{{.Subject}}</span> <span class="muted">{{.Author}}, <span title="{{datefull .Date}}">{{ago .Date}}</span></span></div>{{end}}
+</div>
+{{if .IsBlob}}<div class="blob">
+<div class="blob-head"><b>{{.Name}}</b> <span class="muted">{{size .Size}}{{if .Lines}}, {{len .Lines}} lines{{end}}</span><span class="spacer"></span><a class="btn btn-light" href="{{.Raw}}">View raw</a></div>
+{{if .TooLarge}}<div class="notice">This file is too large to display.</div>
+{{else if .Binary}}<div class="notice">Binary file not shown.</div>
+{{else}}<div class="code"><pre class="lineno">{{range $i, $l := .Lines}}<a id="L{{inc $i}}" href="#L{{inc $i}}">{{inc $i}}</a>
+{{end}}</pre><pre class="lines">{{range .Lines}}{{.}}
+{{end}}</pre></div>{{end}}
+</div>
+{{else}}<table class="tree">
+<tbody>
+{{range .Entries}}<tr><td class="mode">{{.Mode}}</td><td class="name">{{if .Href}}<a href="{{.Href}}"{{if .IsDir}} class="dir"{{end}}>{{.Name}}{{if .IsDir}}/{{end}}</a>{{else}}{{.Name}} <span class="muted">(submodule)</span>{{end}}</td><td class="size">{{if .IsFile}}{{size .Size}}{{end}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}{{end}}{{end}}

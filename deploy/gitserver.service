@@ -1,0 +1,51 @@
+[Unit]
+Description=gitserver
+Documentation=file:///usr/local/share/doc/gitserver/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=git
+Group=git
+Environment=GITSERVER_DATA=/var/lib/gitserver
+# The 2FA encryption key (root-only file) is handed to the service as a
+# credential; the git user itself cannot read /etc/gitserver/secret.key.
+LoadCredential=secret.key:/etc/gitserver/secret.key
+ExecStart=/usr/local/bin/gitserver serve -listen 127.0.0.1:8080 -base-url https://git.example.com -site "git.example.com" -trust-proxy -real-ip-header X-Real-IP
+Restart=on-failure
+RestartSec=5s
+
+StateDirectory=gitserver
+StateDirectoryMode=0700
+UMask=0027
+
+# Hardening
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/gitserver
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Blocked calls fail with EPERM instead of killing the service.
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

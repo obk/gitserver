@@ -1,0 +1,45 @@
+#!/bin/sh
+# gitserver admin helper. gitserver runs in the background as systemd services:
+#   gitserver.service, anubis@gitserver.service, caddy.service
+#
+#   gitserverctl status              are the services running?
+#   gitserverctl logs                follow the logs (Ctrl-C to stop)
+#   gitserverctl restart             restart gitserver, Anubis and Caddy
+#   gitserverctl user add -admin NAME, repo list, invite create, backup FILE, ...
+#                                    any gitserver command, run as the git user
+set -eu
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+
+# run executes gitserver as the git user. The 2FA encryption key is only
+# readable by root; it is passed in the environment (not on the command line,
+# where other users could see it in ps).
+run() {
+	GITSERVER_DATA=/var/lib/gitserver
+	export GITSERVER_DATA
+	if [ -r /etc/gitserver/secret.key ]; then
+		GITSERVER_KEY=$(cat /etc/gitserver/secret.key)
+		export GITSERVER_KEY
+	fi
+	cd /var/lib/gitserver
+	exec runuser -u git -- /usr/local/bin/gitserver "$@"
+}
+
+case "${1:-help}" in
+status)
+	exec systemctl status --no-pager --lines=5 gitserver.service anubis@gitserver.service caddy.service
+	;;
+logs)
+	shift
+	exec journalctl -f -u gitserver.service -u anubis@gitserver.service -u caddy.service "$@"
+	;;
+restart)
+	systemctl restart gitserver.service anubis@gitserver.service caddy.service
+	exec systemctl is-active gitserver.service anubis@gitserver.service caddy.service
+	;;
+help | -h | --help)
+	sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+	echo
+	run help
+	;;
+esac
+run "$@"

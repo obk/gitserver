@@ -1,0 +1,7 @@
+{{define "hero"}}<h1>{{.Site}}</h1>
+<div class="intro">{{.Data.Intro}}</div>
+<p class="hero-actions"><a class="btn" href="/login">Log in &rarr;</a> <span class="muted">Registration is invite-only.</span></p>{{end}}
+
+{{define "content"}}{{with .Data}}<h3>Public repositories</h3>
+{{range .Repos}}{{template "repo-item" .}}{{else}}<div class="notice">There are no public repositories yet.</div>
+{{end}}{{end}}{{end}}

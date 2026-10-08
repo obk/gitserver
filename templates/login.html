@@ -1,0 +1,15 @@
+{{define "content"}}{{with .Data}}<div class="narrow">
+<h3>Log in</h3>
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+<form method="post" action="/login" class="form">
+<input type="hidden" name="next" value="{{.Next}}">
+<label for="username">Username</label>
+<input id="username" name="username" value="{{.Name}}" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required autofocus>
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+<label for="code">Authenticator code</label>
+<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123456" required>
+<button type="submit" class="btn">Log in &rarr;</button>
+</form>
+<p class="muted">Registration is invite-only. Ask an administrator for an invite link.</p>
+</div>{{end}}{{end}}

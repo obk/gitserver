@@ -1,0 +1,6 @@
+{{define "content"}}<div class="narrow">
+<h3>{{.Title}}</h3>
+<div class="alert">{{.Data}}</div>
+{{if not .User}}<p class="muted">Private repositories are only visible after you <a href="/login?next={{.Path}}">log in</a>.</p>{{end}}
+<p><a href="/">&larr; Back to the index</a></p>
+</div>{{end}}

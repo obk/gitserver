@@ -1,0 +1,19 @@
+# A throwaway "VPS" for smoke-testing deploy/install.sh: Ubuntu with systemd,
+# socket-activated OpenSSH and ufw installed but off, like a fresh
+# DigitalOcean droplet. See "Smoke tests" in CLAUDE.md.
+#
+#   podman build -t gitserver-smoke test/smoke
+#   podman run -d --name gs --privileged --systemd=always \
+#       -p 127.0.0.1:2223:22 -p 127.0.0.1:8444:443 gitserver-smoke
+#
+# --privileged is required: without it systemd cannot set up the mount
+# namespaces used by the sandboxed units (fails with status=226/NAMESPACE).
+# Use FROM docker.io/library/debian:12 to test Debian instead.
+FROM docker.io/library/ubuntu:latest
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
+        systemd systemd-sysv dbus openssh-server sudo curl ca-certificates procps ufw iproute2 \
+ && rm -rf /var/lib/apt/lists/* \
+ && systemctl mask getty.target console-getty.service systemd-logind.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

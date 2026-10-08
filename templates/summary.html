@@ -1,0 +1,33 @@
+{{define "content"}}{{with .Data}}{{if .Empty}}<div class="row">
+<section class="col-main">
+<h3>This repository is empty</h3>
+{{if $.IsOwner}}<p>Push an existing repository:</p>
+<pre class="snippet">git remote add origin {{$.Clone}}
+git push -u origin main</pre>
+{{else}}<p class="muted">Nothing has been pushed yet.</p>{{end}}
+</section>
+<aside class="col-side">{{template "clone" $}}</aside>
+</div>
+{{else}}<div class="row">
+<section class="col-main">
+{{range .Commits}}{{template "event" (ev $.Repo.Path .)}}{{end}}
+<p><a href="{{$.Repo.Path}}/log">View full log &rarr;</a></p>
+</section>
+<aside class="col-side">
+{{template "clone" $}}
+<h4>Refs</h4>
+<p><a href="{{$.Repo.Path}}/refs">{{.Branches}} {{if eq .Branches 1}}branch{{else}}branches{{end}}, {{.Tags}} {{if eq .Tags 1}}tag{{else}}tags{{end}}</a></p>
+</aside>
+</div>
+{{if .ReadmeHTML}}<article class="readme markdown">{{.ReadmeHTML}}</article>
+{{else if .ReadmeText}}<article class="readme"><pre>{{.ReadmeText}}</pre></article>
+{{end}}{{end}}{{end}}{{end}}
+
+{{define "clone"}}<h4>Clone</h4>
+<dl class="clone">
+{{if .CloneWeb}}<dt>HTTPS <span class="muted">(read-only)</span></dt><dd><code>{{.CloneWeb}}</code></dd>{{end}}
+<dt>SSH{{if .IsOwner}} <span class="muted">(read/write)</span>{{end}}</dt><dd><code>{{.Clone}}</code></dd>
+</dl>
+{{if .IsOwner}}<p><small class="muted">Pushing works over SSH only.</small></p>
+{{else if not .Repo.Public}}{{else if .User}}<p><small class="muted">Only ~{{.Repo.Owner}} can push.</small></p>
+{{else}}<p><small class="muted">Anyone can clone over HTTPS. SSH needs an account.</small></p>{{end}}{{end}}

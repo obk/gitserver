@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{if .Title}}{{.Title}} - {{end}}{{.Site}}</title>
+<link rel="stylesheet" href="/static/style.css?v={{.AssetVer}}">
+<link rel="stylesheet" href="/static/highlight.css?v={{.AssetVer}}">
+</head>
+<body>
+<nav class="topbar">
+<div class="container">
+<a class="brand" href="/">{{.Site}}</a><span class="product">git</span>
+<span class="spacer"></span>
+{{if .User}}<a href="/create">New repository</a>
+<a href="/~{{.User.Name}}">~{{.User.Name}}</a>
+<a href="/settings/keys">Settings</a>
+<form method="post" action="/logout" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit" class="link">Log out</button></form>
+{{else}}<a href="/login?next={{.Path}}">Log in</a>{{end}}
+</div>
+</nav>
+{{if .Repo}}{{with .Repo}}<header class="header-tabbed">
+<div class="container">
+<h2><a href="/~{{.Owner}}">~{{.Owner}}</a>/<a href="{{.Path}}/">{{.Name}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}</h2>
+{{if .Description}}<p class="desc">{{.Description}}</p>{{end}}
+<ul class="tabs">
+<li><a href="{{.Path}}/" class="{{if eq $.Tab "summary"}}active{{end}}">summary</a></li>
+<li><a href="{{.Path}}/tree" class="{{if eq $.Tab "tree"}}active{{end}}">tree</a></li>
+<li><a href="{{.Path}}/log" class="{{if eq $.Tab "log"}}active{{end}}">log</a></li>
+<li><a href="{{.Path}}/refs" class="{{if eq $.Tab "refs"}}active{{end}}">refs</a></li>
+{{if $.IsOwner}}<li><a href="{{.Path}}/settings" class="{{if eq $.Tab "settings"}}active{{end}}">settings</a></li>{{end}}
+</ul>
+</div>
+</header>{{end}}
+{{else if or (eq .Tab "keys") (eq .Tab "password") (eq .Tab "invites")}}<header class="header-tabbed">
+<div class="container">
+<h2>~{{.User.Name}}</h2>
+<p class="desc">Account settings</p>
+<ul class="tabs">
+<li><a href="/settings/keys" class="{{if eq .Tab "keys"}}active{{end}}">SSH keys</a></li>
+<li><a href="/settings/password" class="{{if eq .Tab "password"}}active{{end}}">password</a></li>
+{{if .User.Admin}}<li><a href="/settings/invites" class="{{if eq .Tab "invites"}}active{{end}}">invites</a></li>{{end}}
+</ul>
+</div>
+</header>
+{{else if eq .Tab "landing"}}<header class="hero">
+<div class="container">
+{{template "hero" .}}
+</div>
+</header>
+{{else}}<div class="header-plain"></div>
+{{end}}<main class="container">
+{{template "content" .}}
+</main>
+<footer class="container">powered by gitserver</footer>
+</body>
+</html>
+{{define "event"}}<div class="event">
+<div class="event-meta"><a class="hash" href="{{.Repo}}/commit/{{.C.Hash}}">{{short .C.Hash}}</a> &mdash; <b>{{.C.Author}}</b> <span class="muted" title="{{datefull .C.Date}}">{{ago .C.Date}}</span><span class="spacer"></span>{{if .C.Files}}<span class="stat" title="{{.C.Files}} files changed"><span class="add">+{{.C.Add}}</span> <span class="del">&minus;{{.C.Del}}</span></span>{{end}}</div>
+<pre class="msg"><a href="{{.Repo}}/commit/{{.C.Hash}}">{{.C.Subject}}</a></pre>
+</div>{{end}}
+{{define "hero"}}{{end}}
+{{define "repo-item"}}<div class="repo-item">
+<h4><a href="{{.Path}}/">{{.FullName}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}</h4>
+{{if .Description}}<p>{{.Description}}</p>{{end}}
+<small class="muted">{{if .Updated.IsZero}}empty{{else}}updated <span title="{{datefull .Updated}}">{{ago .Updated}}</span>{{end}}</small>
+</div>
+{{end}}

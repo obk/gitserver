@@ -1,0 +1,70 @@
+# Anubis policy for gitserver: /etc/anubis/gitserver.botPolicies.yaml
+# Based on the default policy shipped with Anubis v1.27.0.
+bots:
+  # git clone over HTTPS is routed around Anubis by Caddy; this rule only
+  # matters if that routing is ever removed.
+  - name: gitserver-git-clone
+    path_regex: ^/~[^/]+/[^/]+/(info/refs|git-upload-pack|git-receive-pack)$
+    action: ALLOW
+  - name: gitserver-stylesheet
+    path_regex: ^/static/style\.css$
+    action: ALLOW
+
+  - import: (data)/bots/_deny-pathological.yaml
+  - import: (data)/bots/aggressive-brazilian-scrapers.yaml
+  - import: (data)/meta/ai-block-aggressive.yaml
+  - import: (data)/crawlers/_allow-good.yaml
+  - import: (data)/clients/x-firefox-ai.yaml
+  - import: (data)/crawlers/xai.yaml
+  - import: (data)/common/keep-internet-working.yaml
+
+  # Anything claiming to be a browser gets a proof-of-work challenge.
+  - name: generic-browser
+    user_agent_regex: Mozilla|Opera
+    action: WEIGH
+    weight:
+      adjust: 10
+
+dnsbl: false
+
+status_codes:
+  CHALLENGE: 200
+  DENY: 200
+
+thresholds:
+  - name: minimal-suspicion
+    expression: weight <= 0
+    action: ALLOW
+  - name: mild-suspicion
+    expression:
+      all:
+        - weight > 0
+        - weight < 10
+    action: CHALLENGE
+    challenge:
+      algorithm: metarefresh
+      difficulty: 1
+  - name: moderate-suspicion
+    expression:
+      all:
+        - weight >= 10
+        - weight < 20
+    action: CHALLENGE
+    challenge:
+      algorithm: fast
+      difficulty: 2
+  - name: mild-proof-of-work
+    expression:
+      all:
+        - weight >= 20
+        - weight < 30
+    action: CHALLENGE
+    challenge:
+      algorithm: fast
+      difficulty: 4
+  - name: extreme-suspicion
+    expression: weight >= 30
+    action: CHALLENGE
+    challenge:
+      algorithm: fast
+      difficulty: 6

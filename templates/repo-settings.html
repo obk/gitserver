@@ -1,0 +1,22 @@
+{{define "content"}}{{with .Data}}<div class="narrow-left">
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="success">{{.Notice}}</div>{{end}}
+<h3>Repository settings</h3>
+<form method="post" action="{{$.Repo.Path}}/settings" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="description">Description</label>
+<input id="description" name="description" value="{{$.Repo.Description}}" maxlength="200">
+<label>Visibility</label>
+<label class="check"><input type="radio" name="visibility" value="private"{{if not $.Repo.Public}} checked{{end}}> Private: only you can see it</label>
+<label class="check"><input type="radio" name="visibility" value="public"{{if $.Repo.Public}} checked{{end}}> Public: anyone can browse it</label>
+<button type="submit" class="btn">Save &rarr;</button>
+</form>
+<h3 class="danger-title">Delete repository</h3>
+<p>This permanently deletes <b>{{$.Repo.FullName}}</b> and its whole history. It cannot be undone.</p>
+<form method="post" action="{{$.Repo.Path}}/delete" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="confirm">Type <code>{{$.Repo.Name}}</code> to confirm</label>
+<input id="confirm" name="confirm" autocomplete="off" spellcheck="false" required>
+<button type="submit" class="btn btn-danger">Delete this repository</button>
+</form>
+</div>{{end}}{{end}}
