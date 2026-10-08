@@ -366,50 +366,52 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 
 ## Security
 
+Every claim below links to the code that implements it. On this server and on GitHub, the links open the file at that line. `make test` checks that each link still points at the named code ([`TestReadmeCodeLinks`](readme_test.go#L14)).
+
 ### Accounts
 
-- **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once.
-- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct.
-- **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database:
-  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file
-  - each secret is bound to its username, so it can't be moved into another account
-  - a stolen database or backup holds only ciphertext
-  - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins
-  - old plaintext secrets are encrypted automatically and wiped from the database file
-- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing.
-- **Sessions:** server-side, with 256-bit random IDs:
-  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict`
-  - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login
-  - they end immediately when the password or 2FA secret changes, even if changed from the command line
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths.
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form.
+- **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once. Code: [`argonTime`](auth.go#L24), [`hashPassword`](auth.go#L35), [`checkPassword`](auth.go#L48), [`dummyHash`](auth.go#L81), [`argonSem`](auth.go#L33).
+- **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`checkTOTP`](auth.go#L119), [`totpSkew`](auth.go#L93), [`authenticate`](web.go#L264).
+- **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`sealTOTP`](secrets.go#L161), [`openTOTP`](secrets.go#L170).
+  - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L13), [`secret.key`](deploy/install.sh#L396), [`run`](deploy/gitserverctl#L16).
+  - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](secrets.go#L159).
+  - a stolen database or backup holds only ciphertext Code: [`Backup`](store.go#L161).
+  - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`loadSecretBox`](secrets.go#L79).
+  - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`encryptTOTPSecrets`](secrets.go#L189), [`purgeFreedPages`](store.go#L151).
+- **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Code: [`newLimiter`](server.go#L75), [`ipKey`](server.go#L304), [`passwordOK`](web.go#L248).
+- **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](auth.go#L198).
+  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](server.go#L410).
+  - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](auth.go#L165).
+  - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](auth.go#L194), [`withSession`](server.go#L336).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](server.go#L425), [`NewCrossOriginProtection`](server.go#L166), [`safeNext`](web.go#L196).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](store.go#L479), [`RedeemInvite`](store.go#L552).
 
 ### Git
 
-- **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files.
-  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell.
-  - The sshd config applies only to the `git` user.
-  - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys.
-- **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit, and credentials or cookies are stripped before git runs.
-- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied").
+- **SSH:** keys are looked up live in the database by sshd's `AuthorizedKeysCommand`. Every key is restricted (`restrict,command="gitserver ssh-serve USER"`): no shell, PTY, port forwarding or user rc files. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6), [`cmdSSHKeys`](ssh.go#L92), [`authorizedKeyLine`](ssh.go#L125).
+  - `ssh-serve` accepts only `git-upload-pack`, `git-receive-pack` and `git-upload-archive` with a strictly validated `'~owner/repo'` path, checks permissions, and runs git directly without a shell. Code: [`parseSSHCommand`](ssh.go#L154), [`sshRepoArgRe`](ssh.go#L151), [`cmdSSHServe`](ssh.go#L168), [`syscall.Exec`](ssh.go#L222).
+  - The sshd config applies only to the `git` user. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6).
+  - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](server_test.go#L279).
+- **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](server.go#L186), [`gitHTTPRe`](server.go#L181), [`cloneSlots`](server.go#L184), [`Authorization`](server.go#L222).
+- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](web.go#L405), [`Repository not found`](server.go#L209), [`not found or access denied`](ssh.go#L205).
 - **Hardening:**
-  - repository names, refs and paths are validated, and git never runs through a shell
-  - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs
-  - web git processes are capped and time out after 30 s
+  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](repo.go#L34), [`validRev`](git.go#L103), [`cleanTreePath`](web.go#L462), [`gitCmd`](git.go#L55).
+  - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](git.go#L291).
+  - web git processes are capped and time out after 30 s Code: [`gitSlots`](git.go#L40), [`gitTimeout`](git.go#L21).
 
 ### Web
 
-- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes.
-- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages.
-- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain.
-- **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP.
-- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines).
+- **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](server.go#L240), [`qrSVG`](signup.go#L255), [`tokenClass`](highlight.go#L93).
+- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](server.go#L240), [`no-store`](web.go#L89).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. Code: [`handleRaw`](web.go#L733), [`sandbox`](web.go#L763), [`rawContentType`](markdown.go#L83).
+- **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`renderMarkdown`](markdown.go#L25), [`rewriteRelative`](markdown.go#L57).
+- **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Code: [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L14), [`generic-browser`](deploy/anubis.botPolicies.yaml#L22).
 
 ### Server
 
-- **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better).
-- **Nothing extra faces the internet:** gitserver, Anubis and its metrics listen only on `127.0.0.1`.
-- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten.
+- **The systemd unit is sandboxed:** `ProtectSystem=strict`, no capabilities, a syscall filter, private /tmp and devices. `systemd-analyze security` rates it 1.3 ("OK"; lower is better). Code: [`Hardening`](deploy/gitserver.service#L22).
+- **Nothing extra faces the internet:** gitserver, Anubis and its metrics listen only on `127.0.0.1`. Code: [`127.0.0.1:8080`](deploy/gitserver.service#L14), [`BIND`](deploy/anubis.env#L4), [`METRICS_BIND`](deploy/anubis.env#L10).
+- **Private files:** the data folder is `0700`, and the database and backups are `0600`. SQLite `secure_delete` is on, so deleted data is overwritten. Code: [`0700`](deploy/install.sh#L391), [`0o600`](store.go#L112), [`secure_delete`](store.go#L119).
 
 ---
 

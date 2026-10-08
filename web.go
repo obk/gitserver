@@ -15,10 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
 )
 
 const (
@@ -40,13 +36,6 @@ type eventData struct {
 	Repo string
 	C    Commit
 }
-
-// Markdown READMEs are rendered without raw HTML; goldmark also drops
-// javascript: and similar link destinations unless WithUnsafe is set.
-var markdown = goldmark.New(
-	goldmark.WithExtensions(extension.GFM),
-	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
-)
 
 // page is the data passed to every template.
 type page struct {
@@ -134,11 +123,11 @@ func (s *Server) intro() template.HTML {
 	if src == "" {
 		return template.HTML("<p>" + template.HTMLEscapeString(defaultIntro) + "</p>")
 	}
-	var buf bytes.Buffer
-	if err := markdown.Convert([]byte(src), &buf); err != nil {
+	html, err := renderMarkdown([]byte(src), "", "")
+	if err != nil {
 		return ""
 	}
-	return template.HTML(buf.String())
+	return html
 }
 
 // visibleRepos lists the repositories user may see (all owners, or one).
@@ -555,9 +544,13 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, repo *Rep
 		if size, err := blobSize(ctx, repo.Dir, commit, readme); err == nil && size <= maxReadmeSize {
 			if content, err := blobContent(ctx, repo.Dir, commit, readme); err == nil {
 				ext := strings.ToLower(path.Ext(readme))
-				var buf bytes.Buffer
-				if (ext == ".md" || ext == ".markdown") && markdown.Convert(content, &buf) == nil {
-					data.ReadmeHTML = template.HTML(buf.String())
+				var html template.HTML
+				var err error
+				if ext == ".md" || ext == ".markdown" {
+					html, err = renderMarkdown(content, repo.Path()+"/tree/", repo.Path()+"/raw/")
+				}
+				if html != "" && err == nil {
+					data.ReadmeHTML = html
 				} else {
 					data.ReadmeText = string(content)
 				}
@@ -768,7 +761,7 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, repo *Repo, r
 	// Never let a repository file render as active content on this origin.
 	h := w.Header()
 	h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Content-Type", rawContentType(p))
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
 	if !repo.Public {
 		h.Set("Cache-Control", "no-store")
