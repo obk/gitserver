@@ -280,8 +280,13 @@ func Serve(dataDir, name string) error {
 	case "upload-pack":
 		argv = append(argv, "--strict")
 	case "receive-pack":
-		argv = []string{"git", "-c", fmt.Sprintf("receive.maxInputSize=%d", maxPushSize), service}
+		// receive.autogc=false: gitserver runs gc itself after the push,
+		// under the push lock (see push.go).
+		argv = []string{"git", "-c", fmt.Sprintf("receive.maxInputSize=%d", maxPushSize), "-c", "receive.autogc=false", service}
 	}
 	argv = append(argv, repo.Dir)
+	if service == "receive-pack" {
+		return receivePack(gitPath, argv, env, repo, audit)
+	}
 	return syscall.Exec(gitPath, argv, env)
 }
