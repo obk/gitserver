@@ -1211,3 +1211,68 @@ func TestInvitesPerAdmin(t *testing.T) {
 		t.Fatalf("own invite not revoked: %+v", list)
 	}
 }
+
+func TestAccountDelete(t *testing.T) {
+	e := newTestEnv(t)
+	e.pushInitial("bob", "notes")
+	_, inv, _ := e.s.store.CreateInvite("bob", false, time.Hour)
+	e.s.store.Update("bob", func(u *store.User) error { u.Admin = true; return nil }) // so alice isn't the only admin later
+	bob := e.login("bob")
+	_, body := e.get(bob, "/settings/security")
+	csrf := csrfToken(t, body)
+	form := func(confirm, pw, code string) url.Values {
+		return url.Values{"csrf": {csrf}, "confirm": {confirm}, "current": {pw}, "totp": {code}}
+	}
+	reposDir := filepath.Join(e.data, "repos")
+	for _, tc := range []struct {
+		form url.Values
+		want string
+	}{
+		{form("alice", "bob-password-123", e.code("bob")), "Type your user name"},
+		{form("bob", "wrong-password", e.code("bob")), "Password or code is wrong"},
+		{form("bob", "bob-password-123", "000000"), "Password or code is wrong"},
+	} {
+		if code, body := e.post(bob, "/settings/account/delete", tc.form, ""); code == 200 || !strings.Contains(body, tc.want) {
+			t.Fatalf("%v: %d, want %q", tc.form, code, tc.want)
+		}
+	}
+	if _, err := e.s.store.Get("bob"); err != nil || !gitrepo.OwnerDirExists(reposDir, "bob") {
+		t.Fatal("deleted after a failed confirmation")
+	}
+
+	e.s.store.Update("bob", func(u *store.User) error { u.TOTPLast = 0; return nil })
+	code, body := e.post(bob, "/settings/account/delete", form("bob", "bob-password-123", e.code("bob")), "")
+	if code != 200 || !strings.Contains(body, "Your account was deleted") || strings.Contains(body, "~bob") {
+		t.Fatalf("delete: %d\n%s", code, body)
+	}
+	if _, err := e.s.store.Get("bob"); err == nil {
+		t.Fatal("user still exists")
+	}
+	if gitrepo.OwnerDirExists(reposDir, "bob") {
+		t.Fatal("repositories still on disk")
+	}
+	if list, _ := e.s.store.Invites("bob"); len(list) != 0 {
+		t.Fatalf("unused invite %s survived", inv.ID)
+	}
+	if used, _ := e.s.store.NameUsed("bob"); !used {
+		t.Fatal("name not kept reserved")
+	}
+	if _, body := e.get(bob, "/settings/keys"); strings.Contains(body, "Log out") || !strings.Contains(body, `name="password"`) {
+		t.Fatal("old session still works")
+	}
+	if out, err := e.git("bob", e.work, "ls-remote", "git@git.test:~alice/pub"); err == nil {
+		t.Fatalf("SSH key still works: %s", out)
+	}
+	if l, _ := e.s.store.AuditLog(1); len(l) != 1 || l[0].Action != "account deleted" || l[0].Detail != "1 repositories deleted" {
+		t.Fatalf("audit: %+v", l)
+	}
+
+	// The last admin can't delete themselves.
+	alice := e.login("alice")
+	_, body = e.get(alice, "/settings/security")
+	e.s.store.Update("alice", func(u *store.User) error { u.TOTPLast = 0; return nil }) // reuse the login code
+	if code, body := e.post(alice, "/settings/account/delete", url.Values{"csrf": {csrfToken(t, body)}, "confirm": {"alice"},
+		"current": {"alice-password-123"}, "totp": {e.code("alice")}}, ""); code != http.StatusConflict || !strings.Contains(body, "only admin") {
+		t.Fatalf("last admin deleted: %d", code)
+	}
+}

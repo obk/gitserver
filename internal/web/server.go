@@ -156,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /settings/security", s.requireUser(s.handleSecurity))
 	mux.HandleFunc("POST /settings/security/logout", s.requireUser(s.handleSessionLogout))
 	mux.HandleFunc("POST /settings/security/logout-others", s.requireUser(s.handleLogoutOthers))
+	mux.HandleFunc("POST /settings/account/delete", s.requireUser(s.handleAccountDelete))
 	mux.HandleFunc("GET /settings/2fa", s.requireUser(s.handleTwoFactor))
 	mux.HandleFunc("POST /settings/2fa/recovery", s.requireUser(s.handleRecoveryCodes))
 	mux.HandleFunc("POST /settings/2fa/totp", s.requireUser(s.handleTOTPSetup))

@@ -24,4 +24,17 @@
 </table>
 <p class="muted">The last 20 logins. Don't recognize one? Change your password and set up a new authenticator under two-factor, then log out the other sessions above.</p>
 {{else}}<p class="muted">No logins recorded yet.</p>{{end}}
+<h3 id="delete">Delete your account</h3>
+<p>This deletes your account and <b>all your repositories</b> on this server at once, including private ones. It can't be undone: download anything you want to keep first (<code>git clone</code>). Your user name stays reserved and can't be used again.</p>
+{{if .DeleteError}}<div class="alert">{{.DeleteError}}</div>{{end}}
+<form method="post" action="/settings/account/delete#delete" class="form narrow-left">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="confirm">Type your user name, <b>{{$.User.Name}}</b>, to confirm</label>
+<input id="confirm" name="confirm" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64" required>
+<label for="del-current">Password</label>
+<input id="del-current" name="current" type="password" autocomplete="current-password" maxlength="1024" required>
+<label for="del-totp">Authenticator code (or a recovery code)</label>
+<input id="del-totp" name="totp" autocomplete="one-time-code" maxlength="24" required>
+<button type="submit" class="btn btn-danger">Delete my account and repositories</button>
+</form>
 </div>{{end}}{{end}}
