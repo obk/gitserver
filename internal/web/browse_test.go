@@ -228,7 +228,8 @@ func TestCompare(t *testing.T) {
 	_, body := e.get(anon, "/~alice/pub/compare?from=main&to=feature")
 	if !strings.Contains(body, "1 commit on <b>feature</b> that <b>main</b> doesn't have") ||
 		!strings.Contains(body, "add feature") || strings.Contains(body, ">second<") ||
-		!strings.Contains(body, "feature.txt") || !strings.Contains(body, "a feature needle") || strings.Contains(body, "notes.txt") {
+		!strings.Contains(body, `<pre class="diffstat"> feature.txt | 1 &#43;`) || strings.Contains(body, "notes.txt") ||
+		strings.Contains(body, "a feature needle") || strings.Contains(body, `class="diff"`) { // the stat, not the diff
 		t.Fatalf("main to feature:\n%s", body)
 	}
 	// From a tag to a branch: v1 is main, so the same as above.
