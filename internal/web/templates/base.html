@@ -70,7 +70,7 @@
 </div>{{end}}
 {{define "hero"}}{{end}}
 {{define "repo-item"}}<div class="repo-item">
-<h4><a href="{{.Path}}/">{{.FullName}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}</h4>
+<h4><a href="{{.Path}}/">{{.FullName}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}{{if .Mirror}} <span class="badge">mirror</span>{{end}}</h4>
 {{if .Description}}<p>{{.Description}}</p>{{end}}
 <small class="muted">{{if .Updated.IsZero}}empty{{else}}updated <span title="{{datefull .Updated}}">{{ago .Updated}}</span>{{end}}</small>
 </div>
