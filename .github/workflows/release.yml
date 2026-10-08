@@ -1,0 +1,46 @@
+# Publishes a GitHub Release when a version tag is pushed:
+#
+#   git tag 0.0.1 && git push origin 0.0.1      (v0.0.1 works too)
+#
+# The release holds one ready-to-install bundle per architecture under a
+# fixed name, so ".../releases/latest/download/gitserver-linux-amd64.tar.gz"
+# always points at the newest one (see "Installing on a VPS" in README.md),
+# plus SHA256SUMS to check the download.
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]*", "[0-9]*"]
+
+permissions:
+  contents: write # create the release and upload its files
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - name: vet and test
+        run: make test
+      - name: build bundles
+        run: |
+          for arch in amd64 arm64; do
+            make bundle ARCH=$arch VERSION="$GITHUB_REF_NAME"
+            cp "dist/gitserver-$GITHUB_REF_NAME-linux-$arch.tar.gz" "dist/gitserver-linux-$arch.tar.gz"
+          done
+          cd dist && sha256sum gitserver-linux-amd64.tar.gz gitserver-linux-arm64.tar.gz > SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files="dist/gitserver-linux-amd64.tar.gz dist/gitserver-linux-arm64.tar.gz dist/SHA256SUMS"
+          # Re-running the job replaces the files of an existing release.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $files --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
