@@ -24,8 +24,8 @@ set -eu
 
 ANUBIS_VERSION=${ANUBIS_VERSION:-1.27.0}
 # systemd units of gitserver's background jobs, and the units that start them.
-JOB_UNITS="gitserver-fsck.service gitserver-fsck.timer"
-JOB_TRIGGERS="gitserver-fsck.timer"
+JOB_UNITS="gitserver-fsck.service gitserver-fsck.timer gitserver-mirror.service gitserver-mirror.timer gitserver-mirror.path"
+JOB_TRIGGERS="gitserver-fsck.timer gitserver-mirror.timer gitserver-mirror.path"
 LOGFILE=/var/log/gitserver-install.log
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -498,13 +498,14 @@ if put "$HERE/gitserver.socket" /etc/systemd/system/gitserver.socket 0644; then
 else
 	same "socket unit unchanged"
 fi
-# Background jobs, run by timers as the git user: the weekly git fsck.
+# Background jobs, run by timers as the git user: the weekly git fsck and
+# syncing pull mirrors.
 CH_JOBS=0
 for unit in $JOB_UNITS; do
 	put "$HERE/$unit" "/etc/systemd/system/$unit" 0644 && CH_UNIT=1 CH_JOBS=1
 done
 if [ "$CH_JOBS" = 1 ]; then
-	ok "background job units updated (weekly git fsck)"
+	ok "background job units updated (weekly git fsck, mirror sync)"
 	changed "job units"
 else
 	same "background job units unchanged"

@@ -24,6 +24,7 @@ const (
 
 type createData struct {
 	Name, Description, Error string
+	Mirror                   string
 	Public                   bool
 }
 
@@ -40,6 +41,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Name:        strings.TrimSpace(r.PostFormValue("name")),
 		Description: strings.TrimSpace(r.PostFormValue("description")),
 		Public:      r.PostFormValue("visibility") == "public",
+		Mirror:      strings.TrimSpace(r.PostFormValue("mirror")),
+	}
+	if data.Mirror != "" {
+		if _, err := gitrepo.ParseMirrorURL(data.Mirror); err != nil {
+			data.Error = capitalize(err.Error()) + "."
+			s.render(w, http.StatusBadRequest, "create", s.newPage(r, "New repository", data))
+			return
+		}
 	}
 	if repos, err := gitrepo.List(s.reposDir, u.Name); err != nil || len(repos) >= maxReposPerUser {
 		data.Error = fmt.Sprintf("You have reached the limit of %d repositories. Delete one first, or ask the administrator.", maxReposPerUser)
@@ -51,7 +60,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusBadRequest, "create", s.newPage(r, "New repository", data))
 		return
 	}
-	log.Printf("repo created user=%q repo=~%s/%s public=%v", u.Name, u.Name, data.Name, data.Public)
+	if data.Mirror != "" {
+		repo, err := gitrepo.Load(s.reposDir, u.Name, data.Name)
+		if err == nil {
+			err = gitrepo.SetMirror(repo, data.Mirror)
+		}
+		if err == nil {
+			err = gitrepo.RequestMirrorSync(s.cfg.DataDir, repo)
+		}
+		if err != nil {
+			log.Printf("mirror setup ~%s/%s: %v", u.Name, data.Name, err)
+		}
+	}
+	log.Printf("repo created user=%q repo=~%s/%s public=%v mirror=%q", u.Name, u.Name, data.Name, data.Public, data.Mirror)
 	http.Redirect(w, r, "/~"+u.Name+"/"+data.Name+"/", http.StatusSeeOther)
 }
 
@@ -68,6 +89,15 @@ func (s *Server) ownedRepo(w http.ResponseWriter, r *http.Request) *gitrepo.Repo
 
 type repoSettingsData struct {
 	Error, Notice string
+	MirrorStatus  *gitrepo.MirrorStatus
+}
+
+// repoSettingsPage renders the settings of repo with its mirror status.
+func (s *Server) repoSettingsPage(w http.ResponseWriter, r *http.Request, repo *gitrepo.Repo, status int, data repoSettingsData) {
+	if repo.Mirror != "" {
+		data.MirrorStatus = gitrepo.ReadMirrorStatus(repo.Dir)
+	}
+	s.render(w, status, "repo-settings", s.repoPage(r, repo, "settings", "Settings", data))
 }
 
 func (s *Server) handleRepoSettingsForm(w http.ResponseWriter, r *http.Request, repo *gitrepo.Repo) {
@@ -75,7 +105,11 @@ func (s *Server) handleRepoSettingsForm(w http.ResponseWriter, r *http.Request, 
 		s.notFound(w, r)
 		return
 	}
-	s.render(w, http.StatusOK, "repo-settings", s.repoPage(r, repo, "settings", "Settings", repoSettingsData{}))
+	data := repoSettingsData{}
+	if r.URL.Query().Get("sync") == "1" {
+		data.Notice = "Sync started. Reload this page in a minute to see the result."
+	}
+	s.repoSettingsPage(w, r, repo, http.StatusOK, data)
 }
 
 func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
@@ -95,13 +129,37 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = gitrepo.SetProtected(repo, protected)
 	}
+	mirror := strings.TrimSpace(r.PostFormValue("mirror"))
+	if err == nil && mirror != repo.Mirror {
+		if err = gitrepo.SetMirror(repo, mirror); err == nil && mirror != "" {
+			repo.Mirror = mirror
+			err = gitrepo.RequestMirrorSync(s.cfg.DataDir, repo)
+		}
+	}
 	if err != nil {
-		s.render(w, http.StatusBadRequest, "repo-settings", s.repoPage(r, repo, "settings", "Settings", repoSettingsData{Error: capitalize(err.Error()) + "."}))
+		s.repoSettingsPage(w, r, repo, http.StatusBadRequest, repoSettingsData{Error: capitalize(err.Error()) + "."})
 		return
 	}
 	log.Printf("repo settings user=%q repo=%s public=%v protected=%q", repo.Owner, repo.FullName(), public, protected)
 	repo, _ = gitrepo.Load(s.reposDir, repo.Owner, repo.Name)
-	s.render(w, http.StatusOK, "repo-settings", s.repoPage(r, repo, "settings", "Settings", repoSettingsData{Notice: "Settings saved."}))
+	s.repoSettingsPage(w, r, repo, http.StatusOK, repoSettingsData{Notice: "Settings saved."})
+}
+
+func (s *Server) handleMirrorSync(w http.ResponseWriter, r *http.Request) {
+	repo := s.ownedRepo(w, r)
+	if repo == nil {
+		return
+	}
+	if repo.Mirror == "" {
+		s.notFound(w, r)
+		return
+	}
+	if err := gitrepo.RequestMirrorSync(s.cfg.DataDir, repo); err != nil {
+		log.Printf("mirror sync request %s: %v", repo.FullName(), err)
+		s.repoSettingsPage(w, r, repo, http.StatusInternalServerError, repoSettingsData{Error: "Could not start the sync."})
+		return
+	}
+	http.Redirect(w, r, repo.Path()+"/settings?sync=1", http.StatusSeeOther)
 }
 
 func (s *Server) handleRepoDelete(w http.ResponseWriter, r *http.Request) {

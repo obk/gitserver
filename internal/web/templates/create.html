@@ -11,6 +11,9 @@
 <label>Visibility</label>
 <label class="check"><input type="radio" name="visibility" value="private"{{if not .Public}} checked{{end}}> Private: only you can see it</label>
 <label class="check"><input type="radio" name="visibility" value="public"{{if .Public}} checked{{end}}> Public: anyone can browse it</label>
+<label for="mirror">Mirror of <span class="muted">(optional)</span></label>
+<input id="mirror" name="mirror" value="{{.Mirror}}" maxlength="500" placeholder="https://github.com/owner/repo.git" spellcheck="false" autocapitalize="none" inputmode="url">
+<small class="muted">Copies a public repository from another server and keeps it up to date (about hourly). Nobody can push to a mirror.</small>
 <button type="submit" class="btn">Create repository &rarr;</button>
 </form>
 </div>{{end}}{{end}}

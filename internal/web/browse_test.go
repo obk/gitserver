@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go-git-server/internal/gitrepo"
 )
@@ -402,5 +403,74 @@ func TestArchive(t *testing.T) {
 	}
 	if _, body := e.get(anon, "/~alice/pub/"); !strings.Contains(body, `href="/~alice/pub/archive/main.zip"`) {
 		t.Fatal("summary has no download link")
+	}
+}
+
+func TestMirrorSettings(t *testing.T) {
+	e := newTestEnv(t)
+	alice := e.login("alice")
+	_, body := e.get(alice, "/create")
+	csrf := csrfToken(t, body)
+	create := func(name, mirror string) (int, string) {
+		return e.post(alice, "/create", url.Values{"csrf": {csrf}, "name": {name}, "visibility": {"public"}, "mirror": {mirror}}, "")
+	}
+	for _, bad := range []string{"http://github.com/o/r", "https://169.254.169.254/x", "https://u:p@github.com/o/r", "file:///etc"} {
+		if code, _ := create("m", bad); code != http.StatusBadRequest {
+			t.Errorf("mirror source %q accepted: %d", bad, code)
+		}
+	}
+	if code, body := create("m", "https://github.com/obk/gitserver.git"); code != 200 || !strings.Contains(body, "Waiting for the first sync") ||
+		!strings.Contains(body, ">mirror</span>") {
+		t.Fatalf("creating a mirror: %d\n%s", code, body)
+	}
+	repoDir := gitrepo.Dir(filepath.Join(e.data, "repos"), "alice", "m")
+	trigger := filepath.Join(e.data, gitrepo.MirrorTriggerFile)
+	r, _ := gitrepo.Load(filepath.Join(e.data, "repos"), "alice", "m")
+	if r.Mirror != "https://github.com/obk/gitserver.git" || !gitrepo.MirrorDue(r, time.Now()) {
+		t.Fatalf("mirror not set up: %+v", r)
+	}
+	if _, err := os.Stat(trigger); err != nil {
+		t.Fatal("first sync not triggered")
+	}
+
+	// Nobody pushes to a mirror, not even its owner.
+	dir := filepath.Join(e.work, "m-src")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x\n"), 0o644)
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"add", "."}, {"commit", "-qm", "x"}} {
+		e.git("alice", dir, args...)
+	}
+	if out, err := e.git("alice", dir, "push", "git@git.test:~alice/m", "main"); err == nil || !strings.Contains(out, "is a mirror of") {
+		t.Fatalf("push to a mirror: %v\n%s", err, out)
+	}
+
+	// Sync now, then a failed sync's error shows in the settings.
+	os.Remove(trigger)
+	_, body = e.get(alice, "/~alice/m/settings")
+	csrf = csrfToken(t, body)
+	if !strings.Contains(body, "Not synced yet") || !strings.Contains(body, "Sync now") {
+		t.Fatalf("mirror settings:\n%s", body)
+	}
+	if code, body := e.post(alice, "/~alice/m/mirror/sync", url.Values{"csrf": {csrf}}, ""); code != 200 || !strings.Contains(body, "Sync started") {
+		t.Fatalf("sync now: %d", code)
+	}
+	if _, err := os.Stat(trigger); err != nil {
+		t.Fatal("sync now didn't trigger a sync")
+	}
+	os.WriteFile(filepath.Join(repoDir, "gitserver-mirror-status.json"), []byte(`{"at":"2026-01-02T03:04:05Z","error":"git fetch: repository not found"}`), 0o644)
+	if _, body := e.get(alice, "/~alice/m/settings"); !strings.Contains(body, "failed: git fetch: repository not found") {
+		t.Fatal("sync error not shown")
+	}
+	// Other users can't trigger syncs.
+	bob := e.login("bob")
+	_, bobBody := e.get(bob, "/settings/keys")
+	if code, _ := e.post(bob, "/~alice/m/mirror/sync", url.Values{"csrf": {csrfToken(t, bobBody)}}, ""); code != http.StatusNotFound {
+		t.Fatalf("another user triggered a sync: %d", code)
+	}
+
+	// Clearing the source makes it an ordinary repository again.
+	e.post(alice, "/~alice/m/settings", url.Values{"csrf": {csrf}, "description": {""}, "visibility": {"public"}, "mirror": {""}}, "")
+	if out, err := e.git("alice", dir, "push", "git@git.test:~alice/m", "main"); err != nil {
+		t.Fatalf("push after mirroring stopped: %v\n%s", err, out)
 	}
 }

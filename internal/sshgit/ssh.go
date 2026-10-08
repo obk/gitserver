@@ -274,6 +274,10 @@ func Serve(dataDir, name, keyID string) error {
 		audit("busy user=%s service=%s repo=%s", u.Name, service, repo.FullName())
 		return errBusyUser
 	}
+	if write && repo.Mirror != "" {
+		audit("refused push to mirror user=%s repo=%s", u.Name, repo.FullName())
+		return fmt.Errorf("%s is a mirror of %s and is updated from there; push to the source instead (or stop mirroring in the repository's settings)", repo.FullName(), repo.Mirror)
+	}
 	if write {
 		if free, err := freeDisk(repo.Dir); err == nil && free < minFreeDisk {
 			audit("disk full user=%s repo=%s free=%d", u.Name, repo.FullName(), free)

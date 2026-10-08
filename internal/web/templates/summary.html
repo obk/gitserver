@@ -1,7 +1,9 @@
-{{define "content"}}{{with .Data}}{{if .Empty}}<div class="row">
+{{define "content"}}{{with $.Repo.Mirror}}<p class="muted">Mirror of <code>{{.}}</code>, updated about hourly.</p>
+{{end}}{{with .Data}}{{if .Empty}}<div class="row">
 <section class="col-main">
 <h3>This repository is empty</h3>
-{{if $.IsOwner}}<p>Push an existing repository:</p>
+{{if $.Repo.Mirror}}<p class="muted">Waiting for the first sync from the source; this takes a minute.</p>
+{{else if $.IsOwner}}<p>Push an existing repository:</p>
 <pre class="snippet">git remote add origin {{$.Clone}}
 git push -u origin main</pre>
 {{else}}<p class="muted">Nothing has been pushed yet.</p>{{end}}

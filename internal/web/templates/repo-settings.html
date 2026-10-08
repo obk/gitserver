@@ -12,8 +12,19 @@
 <label for="protected">Protected branches</label>
 <input id="protected" name="protected" value="{{join $.Repo.Protected " "}}" maxlength="2100" placeholder="main" autocapitalize="off" spellcheck="false">
 <small class="muted">Separated by spaces; <code>*</code> matches within one part of a name (<code>release/*</code>). These branches can't be deleted or force-pushed, since a force push deletes the dropped commits from the server for good. Pushing new commits on top still works.</small>
+<label for="mirror">Mirror of</label>
+<input id="mirror" name="mirror" value="{{$.Repo.Mirror}}" maxlength="500" placeholder="https://github.com/owner/repo.git" spellcheck="false" autocapitalize="none" inputmode="url">
+<small class="muted">{{if $.Repo.Mirror}}Clear it to stop mirroring; the repository then keeps what it has and accepts pushes.{{else}}Turns this into a copy of a public repository elsewhere, kept up to date about hourly. Its branches and tags are replaced by the source's.{{end}}</small>
 <button type="submit" class="btn">Save &rarr;</button>
 </form>
+{{if $.Repo.Mirror}}<h3>Mirror</h3>
+<p>Copied from <code>{{$.Repo.Mirror}}</code> about every hour.
+{{with .MirrorStatus}}{{if .Error}}</p><div class="alert">The last sync, <span title="{{datefull .At}}">{{ago .At}}</span>, failed: {{.Error}}</div>
+{{else}}Last synced <span title="{{datefull .At}}">{{ago .At}}</span>.</p>{{end}}{{else}}Not synced yet.</p>{{end}}
+<form method="post" action="{{$.Repo.Path}}/mirror/sync" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button type="submit" class="btn btn-light">Sync now</button>
+</form>{{end}}
 <h3 class="danger-title">Delete repository</h3>
 <p>This permanently deletes <b>{{$.Repo.FullName}}</b> and its whole history. It cannot be undone.</p>
 <form method="post" action="{{$.Repo.Path}}/delete" class="form">

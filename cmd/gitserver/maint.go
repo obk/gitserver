@@ -52,3 +52,46 @@ func cmdFsck(args []string) error {
 	}
 	return nil
 }
+
+// cmdMirrorSync: gitserver mirror-sync. Syncs every pull mirror that is
+// due (asked for, or not synced for an hour), one at a time and each under
+// its push lock. Run by gitserver-mirror.timer and gitserver-mirror.path.
+// A failed sync is recorded for the repository's owner to see; it doesn't
+// fail the command.
+func cmdMirrorSync(args []string) error {
+	fs, data := newFlagSet("mirror-sync")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return errUsage
+	}
+	repos, err := gitrepo.List(filepath.Join(*data, "repos"), "")
+	if err != nil {
+		return err
+	}
+	synced, failed := 0, 0
+	for _, repo := range repos {
+		if !gitrepo.MirrorDue(repo, time.Now()) {
+			continue
+		}
+		if free, _, err := gitrepo.DiskSpace(repo.Dir); err == nil && free < 1<<30 {
+			fmt.Println("less than 1 GiB of disk free; not syncing mirrors")
+			break
+		}
+		lock, err := sshgit.LockPush(repo)
+		if err != nil {
+			return err
+		}
+		err = gitrepo.SyncMirror(context.Background(), repo)
+		lock.Close()
+		if err != nil {
+			failed++
+			fmt.Printf("%s: %v\n", repo.FullName(), err)
+			continue
+		}
+		synced++
+	}
+	if synced+failed > 0 {
+		fmt.Printf("synced %d mirrors, %d failed\n", synced, failed)
+	}
+	return nil
+}

@@ -54,6 +54,7 @@ Usage:
   gitserver ssh-serve USER                            forced command for SSH keys
   gitserver backup FILE                               consistent snapshot of the database
   gitserver fsck                                      check every repository with git fsck (weekly timer)
+  gitserver mirror-sync                               fetch the pull mirrors that are due (timer)
   gitserver demo [-listen ADDR]                       throwaway local server with sample data
   gitserver update [-f] [VERSION]                     on an installed server: download the newest
                                                       release and install it (runs gitserverctl update)
@@ -92,6 +93,8 @@ func main() {
 		err = cmdBackup(os.Args[2:])
 	case "fsck":
 		err = cmdFsck(os.Args[2:])
+	case "mirror-sync":
+		err = cmdMirrorSync(os.Args[2:])
 	case "update":
 		err = cmdUpdate(os.Args[2:])
 	case "version":

@@ -24,7 +24,7 @@
 </nav>
 {{if .Repo}}{{with .Repo}}<header class="header-tabbed">
 <div class="container">
-<h2><a href="/~{{.Owner}}">~{{.Owner}}</a>/<a href="{{.Path}}/">{{.Name}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}</h2>
+<h2><a href="/~{{.Owner}}">~{{.Owner}}</a>/<a href="{{.Path}}/">{{.Name}}</a>{{if not .Public}} <span class="badge">private</span>{{end}}{{if .Mirror}} <span class="badge">mirror</span>{{end}}</h2>
 {{if .Description}}<p class="desc">{{.Description}}</p>{{end}}
 <ul class="tabs">
 <li><a href="{{.Path}}/" class="{{if eq $.Tab "summary"}}active{{end}}">summary</a></li>
