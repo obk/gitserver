@@ -256,6 +256,32 @@ var recoveryCodesSchema = []string{
 	) STRICT`,
 }
 
+// loginsSchema keeps each user's recent successful logins (when, from which
+// IP and browser, how), so users can spot a login that wasn't them. Only
+// the newest maxLogins per user are kept. Added like code_alerts.
+var loginsSchema = []string{
+	`CREATE TABLE IF NOT EXISTS logins (
+		id     INTEGER PRIMARY KEY,
+		user   TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE,
+		at     INTEGER NOT NULL,
+		ip     TEXT NOT NULL,
+		agent  TEXT NOT NULL,
+		method TEXT NOT NULL
+	) STRICT`,
+	`CREATE INDEX IF NOT EXISTS logins_user ON logins(user, at)`,
+}
+
+// maxLogins is how many logins are kept per user.
+const maxLogins = 20
+
+// Login is one successful login.
+type Login struct {
+	At     time.Time
+	IP     string
+	Agent  string // the browser's User-Agent header
+	Method string // e.g. "password and code", "recovery code"
+}
+
 // ensureTable adds a table that was introduced after schema version 1 to a
 // database created before it existed. Like ensureUsedNames, it only writes
 // when the table is missing.
@@ -287,7 +313,10 @@ func (s *Store) migrate(dataDir string) error {
 		if err := s.ensureTable("code_alerts", codeAlertsSchema); err != nil {
 			return err
 		}
-		return s.ensureTable("recovery_codes", recoveryCodesSchema)
+		if err := s.ensureTable("recovery_codes", recoveryCodesSchema); err != nil {
+			return err
+		}
+		return s.ensureTable("logins", loginsSchema)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -304,7 +333,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema) {
+		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -532,6 +561,44 @@ func (s *Store) RecoveryCodesLeft(user string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT count(*) FROM recovery_codes WHERE user = ?`, user).Scan(&n)
 	return n, err
+}
+
+// RecordLogin adds a successful login of user, keeping only the newest
+// maxLogins. The browser string is cut to 200 bytes.
+func (s *Store) RecordLogin(user string, l Login) error {
+	if len(l.Agent) > 200 {
+		l.Agent = l.Agent[:200]
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO logins (user, at, ip, agent, method) VALUES (?, ?, ?, ?, ?)`,
+			user, l.At.Unix(), l.IP, l.Agent, l.Method); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM logins WHERE user = ? AND id NOT IN
+			(SELECT id FROM logins WHERE user = ? ORDER BY at DESC, id DESC LIMIT ?)`, user, user, maxLogins)
+		return err
+	})
+}
+
+// RecentLogins returns up to n of user's logins, newest first.
+func (s *Store) RecentLogins(user string, n int) ([]Login, error) {
+	rows, err := s.db.Query(`SELECT at, ip, agent, method FROM logins WHERE user = ?
+		ORDER BY at DESC, id DESC LIMIT ?`, user, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Login
+	for rows.Next() {
+		var l Login
+		var at int64
+		if err := rows.Scan(&at, &l.IP, &l.Agent, &l.Method); err != nil {
+			return nil, err
+		}
+		l.At = fromUnix(at)
+		list = append(list, l)
+	}
+	return list, rows.Err()
 }
 
 // NameUsed reports whether name belongs, or once belonged, to an account.

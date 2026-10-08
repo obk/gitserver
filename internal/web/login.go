@@ -110,8 +110,30 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		log.Printf("login ok user=%q ip=%s", name, ip)
 	}
 	notice := strings.Join(notices, " ")
-	s.startSession(w, r, u, notice)
+	method := "password and authenticator code"
+	if viaRecovery {
+		method = "password and recovery code"
+	}
+	id := s.startSession(w, r, u, notice)
+	s.recordLogin(id, u.Name, ip, r.UserAgent(), method)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// recordLogin adds a login to the user's history (Settings -> security)
+// and tells the new session, once, when and from where the previous
+// login was, so a login that wasn't the user stands out.
+func (s *Server) recordLogin(sessionID, user, ip, agent, method string) {
+	prev, err := s.store.RecentLogins(user, 1)
+	if err != nil {
+		log.Printf("login history: user=%q: %v", user, err)
+	}
+	if err := s.store.RecordLogin(user, store.Login{At: time.Now(), IP: ip, Agent: agent, Method: method}); err != nil {
+		log.Printf("login history: user=%q: %v", user, err)
+	}
+	if len(prev) == 1 {
+		s.sessions.setFlash(sessionID, fmt.Sprintf("Last login: %s from %s (%s). Not you? See Settings → security.",
+			prev[0].At.UTC().Format("2006-01-02 15:04 MST"), prev[0].IP, describeAgent(prev[0].Agent)))
+	}
 }
 
 // authenticate checks password and TOTP code and returns the user on
