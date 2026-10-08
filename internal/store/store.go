@@ -274,10 +274,11 @@ var loginsSchema = []string{
 // maxLogins is how many logins are kept per user.
 const maxLogins = 20
 
-// auditSchema is the admin audit log: who changed accounts, invites and
-// account security, from the web UI or the command line. It has no foreign
-// keys, so the record of a deleted user stays. Only the newest maxAudit
-// entries are kept. Added like code_alerts.
+// auditSchema is the audit log: who changed accounts, invites and account
+// security, from the web UI or the command line. Each user sees the
+// entries about themselves (as actor or target). It has no foreign keys,
+// so the record of a deleted user stays. Only the newest maxAudit entries
+// are kept. Added like code_alerts.
 var auditSchema = []string{
 	`CREATE TABLE IF NOT EXISTS audit_log (
 		id     INTEGER PRIMARY KEY,
@@ -299,8 +300,8 @@ var keyUsedSchema = []string{
 	) STRICT`,
 }
 
-// maxAudit is how many audit log entries are kept.
-const maxAudit = 1000
+// maxAudit is how many audit log entries are kept, for all users together.
+var maxAudit = 5000 // a variable for tests
 
 // AuditEntry is one entry of the audit log.
 type AuditEntry struct {
@@ -668,10 +669,12 @@ func (s *Store) Audit(e AuditEntry) error {
 	})
 }
 
-// AuditLog returns up to n audit log entries, newest first.
-func (s *Store) AuditLog(n int) ([]AuditEntry, error) {
+// AuditLog returns up to n audit log entries about user, newest first:
+// the ones they made and the ones made to their account. With user "",
+// all of them.
+func (s *Store) AuditLog(user string, n int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`SELECT at, actor, action, target, detail, ip FROM audit_log
-		ORDER BY at DESC, id DESC LIMIT ?`, n)
+		WHERE ? = '' OR actor = ? OR target = ? ORDER BY at DESC, id DESC LIMIT ?`, user, user, user, n)
 	if err != nil {
 		return nil, err
 	}

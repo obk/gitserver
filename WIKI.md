@@ -321,6 +321,15 @@ Right after you log in, a note at the top of the page shows your previous login.
 
 Both need your current password. Accounts created with `gitserverctl user add` start without recovery codes; make them on this page.
 
+### Audit log
+
+**Settings → audit log** lists the changes to your account, newest first, with when and from which IP address:
+
+- what you did: SSH keys added or deleted, password changes, new authenticators and recovery codes, invites created or revoked, your signup
+- what was done to your account by the server's administrator with `gitserverctl` (shown as "command line", with the name of whoever ran `sudo`): user created, password or authenticator reset, admin rights given or removed, keys added or deleted
+
+Only you see your list; admins don't see other people's. Logins are in your [login history](#sessions-and-logins). Repository events aren't in it.
+
 ### Deleting your account
 
 At the bottom of **Settings → security**. Type your user name and enter your password and an authenticator (or recovery) code. Your account, SSH keys, unused invites **and all your repositories, private and public, are deleted at once**; this can't be undone, so clone anything you want to keep first. Your user name stays reserved for good, so nobody can take your place. The only admin can't delete their account; make someone else an admin first.
@@ -390,6 +399,7 @@ Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME
 - Git over SSH, an audit log of every clone, push and rejected command: `journalctl -t gitserver-ssh`.
 - Anubis and Caddy: `journalctl -u anubis@gitserver`, `journalctl -u caddy`, and `/var/log/caddy/gitserver.log`.
 - Blocked SSH addresses: `sudo fail2ban-client status sshd`.
+- The whole [audit log](#audit-log), of every user (on the web each user only sees their own): `sudo gitserverctl audit` (newest 50; `-n 200` for more, or a user name for one user).
 - Background jobs: `journalctl -u gitserver-fsck` (repository checks) and `journalctl -u gitserver-mirror` (mirror syncs).
 
 ### Disk and repository checks
@@ -397,18 +407,6 @@ Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME
 Admins see **Settings → disk**: free space on the server, and the size and number of repositories of each user (without repository names, so private ones stay private), plus the result of the last repository check.
 
 That check is `git fsck` on every repository, run weekly by `gitserver-fsck.timer`, so damage from a failing disk shows up while your snapshots still have a good copy. Each repository is checked while no push to it is running. Damaged ones are listed in `journalctl -u gitserver-fsck`, and the disk page shows how many there are. To check now: `sudo gitserverctl fsck`.
-
-### Audit log
-
-Admins see **Settings → audit log**: who changed what about accounts, invites and account security, when, and from which IP address. It lists:
-
-- invites created and revoked
-- signups, accounts deleted by their owners, and users created or deleted with `gitserverctl`
-- admin rights given or removed
-- password changes, new authenticators, new recovery codes
-- SSH keys added or deleted
-
-Changes made with `gitserverctl` show up as "command line", with the name of the account that ran `sudo`. Repository events (create, push, delete, public/private) are deliberately **not** in it: an admin must not learn the names of other people's private repositories. Logins are in each user's own [login history](#sessions-and-logins). The last 1000 entries are kept; the page shows the newest 200.
 
 ---
 
@@ -453,8 +451,9 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 | Push, settings, delete | ✘ | ✘ | ✔ |
 | Delete the account (with all its repositories) | ✘ | own account only | ✔ |
 | Create invites, see and revoke your own | ✘ | admins only | (admins only) |
+| See the audit log of your own account | ✘ | ✔ | ✔ |
 
-**Admins have no extra access to repositories.** They can create invites and see the audit log and the disk page, neither of which shows repository names; the server operator manages everything else from the command line.
+**Admins have no extra access to repositories.** They can create invites and see the disk page, which shows no repository names; the server operator manages everything else from the command line.
 
 ---
 
@@ -466,8 +465,8 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
 - **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L148).
-- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L612).
-- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L594), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
+- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L613).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L595), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
   - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L457), [`run`](deploy/gitserverctl#L18).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
@@ -475,15 +474,15 @@ Every claim below links to the code that implements it. On this server and on Gi
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L548), [`TakeCodeFailures`](internal/store/store.go#L556).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L549), [`TakeCodeFailures`](internal/store/store.go#L557).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L85).
   - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
 - **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L181), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L893), [`RedeemInvite`](internal/store/store.go#L972).
-- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L649).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L896), [`RedeemInvite`](internal/store/store.go#L975).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded; each user sees the entries about their own account, and the server operator sees all of them with `gitserverctl audit`. There are no repository names in it. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L282), [`cliAudit`](cmd/gitserver/main.go#L652).
 
 ### Git
 
@@ -581,7 +580,7 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Signup | 15 minutes between step 1 and the 2FA confirmation |
 | Recovery codes | 10 per account, each usable once |
 | Login history | the last 20 logins per account |
-| Audit log | the last 1000 entries (the page shows 200) |
+| Audit log | the last 5000 entries for all users together (each user's page shows their newest 200) |
 | SSH login failures | 5 within 10 min block the address for 1 h (fail2ban) |
 | File view | files up to 1 MiB are shown; larger ones via "View raw" |
 | Syntax highlighting | files up to 512 KiB / 2 s; diffs up to 1 MiB |

@@ -1145,9 +1145,6 @@ func TestAuditLogPage(t *testing.T) {
 	bob := e.login("bob")
 	_, body := e.get(bob, "/settings/keys")
 	e.post(bob, "/settings/keys", url.Values{"csrf": {csrfToken(t, body)}, "key": {newTestKey(t) + " second"}}, "198.51.100.7")
-	if status, _ := e.get(bob, "/settings/audit"); status != http.StatusNotFound {
-		t.Fatalf("non-admin reached the audit log: %d", status)
-	}
 
 	alice := e.login("alice")
 	_, body = e.get(alice, "/settings/invites")
@@ -1166,25 +1163,44 @@ func TestAuditLogPage(t *testing.T) {
 		t.Fatalf("%v: %s", err, out)
 	}
 
-	status, body := e.get(alice, "/settings/audit")
-	if status != 200 {
-		t.Fatalf("audit log: %d\n%s", status, body)
+	// Each user sees only what is about them, admins included.
+	page := func(c *http.Client) string {
+		t.Helper()
+		status, body := e.get(c, "/settings/audit")
+		if status != 200 {
+			t.Fatalf("audit log: %d\n%s", status, body)
+		}
+		return body
 	}
-	for _, want := range []string{
-		"SSH key added <b>bob</b>", "198.51.100.7",
-		"invite created", "id " + invites[0].ID, "makes an admin", "invite revoked",
-		"command line (sudo carol)", "admin rights given <b>bob</b>",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("audit log lacks %q", want)
+	check := func(who, body string, want, not []string) {
+		t.Helper()
+		for _, w := range want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s's audit log lacks %q", who, w)
+			}
+		}
+		for _, n := range not {
+			if strings.Contains(body, n) {
+				t.Errorf("%s's audit log shows %q", who, n)
+			}
 		}
 	}
-	if strings.Contains(body, "secret") {
-		t.Error("audit log mentions a private repository")
+	check("bob", page(bob),
+		[]string{"SSH key added <b>bob</b>", "198.51.100.7", "command line (sudo carol)", "admin rights given <b>bob</b>"},
+		[]string{"invite created", "invite revoked"})
+	check("alice", page(alice),
+		[]string{"invite created", "id " + invites[0].ID, "makes an admin", "invite revoked"},
+		[]string{"SSH key added", "198.51.100.7", "admin rights given", "secret"})
+
+	// The whole log is on the server.
+	out, err := exec.Command(testBinary, "audit", "-data", e.data).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "admin rights given bob") || !strings.Contains(string(out), "invite revoked") ||
+		!strings.Contains(string(out), "198.51.100.7") {
+		t.Fatalf("gitserver audit: %v\n%s", err, out)
 	}
-	list, _ := e.s.store.AuditLog(10)
-	if len(list) != 4 || list[0].Action != "admin rights given" || list[0].IP != "" || list[3].Actor != "bob" {
-		t.Fatalf("entries: %+v", list)
+	if out, _ := exec.Command(testBinary, "audit", "-data", e.data, "-n", "1", "alice").CombinedOutput(); strings.Count(strings.TrimSpace(string(out)), "\n") != 0 ||
+		!strings.Contains(string(out), "invite revoked") {
+		t.Fatalf("gitserver audit -n 1 alice:\n%s", out)
 	}
 }
 
@@ -1263,7 +1279,7 @@ func TestAccountDelete(t *testing.T) {
 	if out, err := e.git("bob", e.work, "ls-remote", "git@git.test:~alice/pub"); err == nil {
 		t.Fatalf("SSH key still works: %s", out)
 	}
-	if l, _ := e.s.store.AuditLog(1); len(l) != 1 || l[0].Action != "account deleted" || l[0].Detail != "1 repositories deleted" {
+	if l, _ := e.s.store.AuditLog("", 1); len(l) != 1 || l[0].Action != "account deleted" || l[0].Detail != "1 repositories deleted" {
 		t.Fatalf("audit: %+v", l)
 	}
 

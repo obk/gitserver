@@ -7,11 +7,11 @@ import (
 	"go-git-server/internal/store"
 )
 
-// The audit log records changes to accounts, invites and account security,
-// for admins (Settings -> audit log). Repository events are deliberately
-// left out: an admin must not learn the names of other users' private
-// repositories from it. Entries made with the gitserver command line show
-// up here too.
+// The audit log records changes to accounts, invites and account
+// security. Each user sees their own (Settings -> audit log): what they
+// changed, and what was changed on their account, including by the server
+// operator with gitserverctl. Repository events are left out. The whole log
+// is only on the server: gitserver audit.
 
 type auditData struct {
 	Entries []store.AuditEntry
@@ -35,7 +35,7 @@ func (s *Server) auditAs(r *http.Request, actor, action, target, detail string) 
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.store.AuditLog(auditShown)
+	entries, err := s.store.AuditLog(currentUser(r).Name, auditShown)
 	if err != nil {
 		s.error(w, r, http.StatusInternalServerError, "Could not load the audit log.")
 		return

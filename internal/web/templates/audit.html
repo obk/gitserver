@@ -1,11 +1,11 @@
 {{define "content"}}{{with .Data}}<div>
-<p class="muted">Changes to accounts, invites and account security, newest first, from the web and from the command line (<code>gitserverctl</code>). Repository events are not listed, so private repositories stay private. The last 1000 entries are kept; this page shows the newest 200.</p>
+<p class="muted">Changes to your account, newest first: what you changed (keys, password, two-factor, invites) and what was changed on your account, also by the server's administrator on the command line. Only you see this list. Logins are under <a href="/settings/security">security</a>.</p>
 {{if .Entries}}<table class="list">
 <thead><tr><th>When</th><th>Who</th><th>What</th><th>IP address</th></tr></thead>
 <tbody>
 {{range .Entries}}<tr><td><span title="{{datefull .At}}">{{date .At}}</span></td><td>{{.Actor}}</td>
 <td>{{.Action}}{{with .Target}} <b>{{.}}</b>{{end}}{{with .Detail}}<br><small class="muted">{{.}}</small>{{end}}</td>
-<td>{{with .IP}}<code>{{.}}</code>{{else}}<span class="muted">server</span>{{end}}</td></tr>
+<td>{{with .IP}}<code>{{.}}</code>{{else}}<span class="muted">on the server</span>{{end}}</td></tr>
 {{end}}</tbody>
 </table>
 {{else}}<p class="muted">Nothing recorded yet.</p>{{end}}
