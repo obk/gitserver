@@ -262,7 +262,9 @@ The first visit to any page may briefly show Anubis' "Making sure you're not a b
 ### Repositories
 
 - **Create:** **New repository** → name, optional description, private (default) or public. Names may use letters, digits, `.`, `_` and `-`, up to 100 characters, and must not end in `.git`.
-- **Settings tab** (owner only): change the description or visibility, or **delete** the repository (type its name to confirm; this can't be undone).
+- **Settings tab** (owner only): change the description, visibility or protected branches, or **delete** the repository (type its name to confirm; this can't be undone).
+- **Protected branches:** list branches in the settings tab (e.g. `main`, or `release/*`, where `*` matches within one part of the name). Pushes that would delete them or force-push over their commits are refused as a whole, with a message saying why; pushing new commits on top works as usual. Since a force push deletes the dropped commits from the server for good, protect at least your main branch. Tags aren't covered.
+- **Downloads:** any branch or tag as `.tar.gz` or `.zip` (made by `git archive`), from the summary and the refs tab, or at `…/~owner/repo/archive/NAME.tar.gz` (a tag: `archive/refs/tags/v1.0.zip`). The files have one top folder, `repo-NAME/`. Downloads count toward the same limits as HTTPS clones.
 - **Your repos** are listed at `https://git.example.com/~you`. The front page shows your repos plus everyone's public ones.
 - **Browsing:** the web UI shows a summary (latest commits, README rendered from Markdown, clone URLs), file tree, files with line numbers and syntax highlighting, a raw file download, the commit log (50 per page), commits with highlighted diffs, branches and tags.
 - **Line links:** click a line number to highlight that line; then click another number to highlight the range between them, and copy the address bar to share it, e.g. `…/tree/main.go?lines=12-20#L12`. Clicking the highlighted line again, or **Clear**, removes the highlight. A plain `#L12` link highlights one line too. It works without JavaScript; each click reloads the page.
@@ -289,7 +291,7 @@ git remote set-url --push origin git@git.example.com:~you/project
 
 Pushing over HTTPS is refused with a message that shows the SSH URL. Note the **`git@`** and the **`:`** in SSH URLs: without `git@`, SSH logs in as your local username and fails.
 
-**Force-pushing or deleting a branch or tag deletes the removed commits from the server for good**, so a secret pushed by mistake is really gone once you force-push over it. Make sure your own copy has anything you still need. Such pushes take a moment longer and say so.
+**Force-pushing or deleting a branch or tag deletes the removed commits from the server for good**, so a secret pushed by mistake is really gone once you force-push over it. Make sure your own copy has anything you still need, and [protect](#repositories) the branches that must never lose history. Such pushes take a moment longer and say so.
 
 ### Inviting people
 
@@ -376,7 +378,7 @@ sudo gitserverctl repo public '~owner/name'
 sudo gitserverctl repo private '~owner/name'
 ```
 
-Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME.git` (owned by `git:git`). Create the user first, or use `user add`, which warns about the existing folder; web signup refuses such names. Names that ever had an account can't be used again. A repo is public exactly when the file `git-daemon-export-ok` exists inside it, and its description is the file `description`.
+Existing bare repositories can be copied to `/var/lib/gitserver/repos/OWNER/NAME.git` (owned by `git:git`). Create the user first, or use `user add`, which warns about the existing folder; web signup refuses such names. Names that ever had an account can't be used again. A repo is public exactly when the file `git-daemon-export-ok` exists inside it, its description is the file `description`, and its protected branches are listed in `gitserver-protected-branches`, one per line. Hooks in a repository's `hooks/` folder are never run.
 
 ### Logs
 
@@ -470,7 +472,7 @@ Every claim below links to the code that implements it. On this server and on Gi
 - **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L179), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
 - **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L825), [`RedeemInvite`](internal/store/store.go#L904).
-- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L633).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded for admins, with no repository names in them. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L281), [`cliAudit`](cmd/gitserver/main.go#L642).
 
 ### Git
 
@@ -479,25 +481,26 @@ Every claim below links to the code that implements it. On this server and on Gi
   - The sshd config applies only to the `git` user. Code: [`Match User git`](deploy/sshd-gitserver.conf#L6).
   - All of this was tested against a real OpenSSH server: clone, push, shell attempts, port forwarding and unknown keys. The automated test runs the same key lookup and forced command. Code: [`TestGitSSH`](internal/web/server_test.go#L211).
 - **HTTPS clone:** only git's smart-HTTP `git-upload-pack`, only public repositories, with pushing disabled. There's no dumb protocol and no direct file access. Clones have their own concurrency limit and end after 30 minutes, so stalled clients can't hold the slots, and credentials or cookies are stripped before git runs. Code: [`serveGitHTTP`](internal/web/gitclone.go#L30), [`cloneTimeout`](internal/web/gitclone.go#L28), [`gitHTTPRe`](internal/web/gitclone.go#L17), [`cloneSlots`](internal/web/gitclone.go#L20), [`Authorization`](internal/web/gitclone.go#L80).
-- **Removed commits are deleted from disk:** a push that force-pushes over commits, deletes a branch or tag, or moves a tag runs `git gc --prune=now` right after it, so a leaked secret is gone from the server, not just hidden. Normally git would keep such commits for two weeks. The push shows a line saying so and takes a little longer; ordinary pushes don't change. Pushes to the same repository wait for each other, including this cleanup, so it can't delete objects that another push is writing. That's why there's no grace period, which would also have kept the commits of a quick "oops, force-push" alive. Code: [`receivePack`](internal/sshgit/push.go#L34), [`historyRemoved`](internal/sshgit/push.go#L125), [`lockPush`](internal/sshgit/push.go#L88).
+- **Removed commits are deleted from disk:** a push that force-pushes over commits, deletes a branch or tag, or moves a tag runs `git gc --prune=now` right after it, so a leaked secret is gone from the server, not just hidden. Normally git would keep such commits for two weeks. The push shows a line saying so and takes a little longer; ordinary pushes don't change. Pushes to the same repository wait for each other, including this cleanup, so it can't delete objects that another push is writing. That's why there's no grace period, which would also have kept the commits of a quick "oops, force-push" alive. Code: [`receivePack`](internal/sshgit/push.go#L34), [`historyRemoved`](internal/sshgit/push.go#L131), [`lockPush`](internal/sshgit/push.go#L94).
+- **Protected branches and hooks:** every push runs git with `core.hooksPath` set to a temporary folder holding only gitserver's own `pre-receive` hook, so hooks inside a repository folder never run. That hook refuses the whole push, before any ref changes, if it deletes a protected branch or moves one to a commit that doesn't contain the old one. Code: [`hookDir`](internal/sshgit/hook.go#L33), [`PreReceive`](internal/sshgit/hook.go#L63), [`IsProtected`](internal/gitrepo/protect.go#L73).
 - **Unreachable commits are never served:** commits no branch or tag reaches (in repositories from before the cleanup above, or if it failed) are not shown. The web UI only shows reachable commits, and commit pages need the full hash (a short one redirects to it, if the commit is reachable). Git protocol v2 is not offered over SSH or HTTPS because its upload-pack serves any object by hash; clients fall back to v0/v1, which only serve what the refs reach. Code: [`reachable`](internal/gitrepo/git.go#L146), [`Git-Protocol`](internal/web/gitclone.go#L82), [`version=1`](internal/sshgit/ssh.go#L275).
-- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L144), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L251).
+- **No information leaks:** private and missing repositories give the same answer on the web (404), over HTTPS ("Repository not found") and over SSH ("not found or access denied"). Code: [`handleRepo`](internal/web/repos.go#L150), [`Repository not found`](internal/web/gitclone.go#L53), [`not found or access denied`](internal/sshgit/ssh.go#L251).
 - **Hardening:**
-  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L39), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L121), [`Command`](internal/gitrepo/git.go#L56).
+  - repository names, refs and paths are validated, and git never runs through a shell Code: [`validRepoName`](internal/gitrepo/repo.go#L40), [`validRev`](internal/gitrepo/git.go#L104), [`cleanTreePath`](internal/web/repos.go#L127), [`Command`](internal/gitrepo/git.go#L56).
   - diffs use `--no-ext-diff --no-textconv`, so repository content can't make git run programs Code: [`--no-textconv`](internal/gitrepo/git.go#L198).
   - web git processes are capped and time out after 30 s Code: [`gitSlots`](internal/gitrepo/git.go#L41), [`Timeout`](internal/gitrepo/git.go#L22).
 - **Limits per account and client,** so one user or address can't fill the disk or take all the capacity:
   - a push may send at most 1 GiB (git's `receive.maxInputSize`), and pushes are refused while less than 1 GiB of disk is free Code: [`maxPushSize`](internal/sshgit/ssh.go#L152), [`minFreeDisk`](internal/sshgit/ssh.go#L153).
   - each user runs at most 4 git operations over SSH at once. The count is kept in lock files that git holds until it exits, so crashed processes free their slot Code: [`MaxGitPerUser`](internal/sshgit/ssh.go#L154), [`AcquireUserSlot`](internal/sshgit/ssh.go#L165).
-  - each client address (IPv6: each /64) runs at most 2 HTTPS clones at once Code: [`clonesPerIP`](internal/web/gitclone.go#L24).
+  - each client address (IPv6: each /64) runs at most 2 HTTPS clones or archive downloads at once Code: [`clonesPerIP`](internal/web/gitclone.go#L24).
   - each user can create at most 100 repositories in the web UI; the command line isn't limited Code: [`maxReposPerUser`](internal/web/repos.go#L35).
   - to change a limit, edit the constant and rebuild.
 
 ### Web
 
 - **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
-- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L85).
-- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L467), [`sandbox`](internal/web/repos.go#L497), [`Content-Disposition`](internal/web/repos.go#L502), [`RawContentType`](internal/render/markdown.go#L85).
+- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L86).
+- **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L477), [`sandbox`](internal/web/repos.go#L507), [`Content-Disposition`](internal/web/repos.go#L512), [`RawContentType`](internal/render/markdown.go#L85).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L59).
 - **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L381), [`Compare`](internal/gitrepo/git.go#L447), [`validRev`](internal/gitrepo/git.go#L104).
 - **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
@@ -576,7 +579,8 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Compare | the newest 250 commits; the diff like the commit view |
 | Push size | 1 GiB per push; pushes stop while less than 1 GiB of disk is free |
 | Git over SSH | 4 operations at once per user |
-| HTTPS clone | 2 at once per client address (IPv6: per /64) |
+| HTTPS clone and archive download | 2 at once per client address (IPv6: per /64); 30 min each |
+| Protected branches | 20 names or patterns per repository |
 | Repositories | 100 per user from the web UI (the command line isn't limited) |
 
 ---

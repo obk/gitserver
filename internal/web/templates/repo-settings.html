@@ -9,6 +9,9 @@
 <label>Visibility</label>
 <label class="check"><input type="radio" name="visibility" value="private"{{if not $.Repo.Public}} checked{{end}}> Private: only you can see it</label>
 <label class="check"><input type="radio" name="visibility" value="public"{{if $.Repo.Public}} checked{{end}}> Public: anyone can browse it</label>
+<label for="protected">Protected branches</label>
+<input id="protected" name="protected" value="{{join $.Repo.Protected " "}}" maxlength="2100" placeholder="main" autocapitalize="off" spellcheck="false">
+<small class="muted">Separated by spaces; <code>*</code> matches within one part of a name (<code>release/*</code>). These branches can't be deleted or force-pushed, since a force push deletes the dropped commits from the server for good. Pushing new commits on top still works.</small>
 <button type="submit" class="btn">Save &rarr;</button>
 </form>
 <h3 class="danger-title">Delete repository</h3>

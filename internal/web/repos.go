@@ -85,15 +85,21 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	desc := strings.TrimSpace(r.PostFormValue("description"))
 	public := r.PostFormValue("visibility") == "public"
-	err := gitrepo.SetDescription(repo, desc)
+	protected, err := gitrepo.ParseProtected(r.PostFormValue("protected"))
+	if err == nil {
+		err = gitrepo.SetDescription(repo, desc)
+	}
 	if err == nil {
 		err = gitrepo.SetPublic(s.reposDir, repo.Owner, repo.Name, public)
+	}
+	if err == nil {
+		err = gitrepo.SetProtected(repo, protected)
 	}
 	if err != nil {
 		s.render(w, http.StatusBadRequest, "repo-settings", s.repoPage(r, repo, "settings", "Settings", repoSettingsData{Error: capitalize(err.Error()) + "."}))
 		return
 	}
-	log.Printf("repo settings user=%q repo=%s public=%v", repo.Owner, repo.FullName(), public)
+	log.Printf("repo settings user=%q repo=%s public=%v protected=%q", repo.Owner, repo.FullName(), public, protected)
 	repo, _ = gitrepo.Load(s.reposDir, repo.Owner, repo.Name)
 	s.render(w, http.StatusOK, "repo-settings", s.repoPage(r, repo, "settings", "Settings", repoSettingsData{Notice: "Settings saved."}))
 }
@@ -172,6 +178,8 @@ func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 		s.handleRepoSettingsForm(w, r, repo)
 	case rest == "tree" || strings.HasPrefix(rest, "tree/"):
 		s.handleTree(w, r, repo, strings.TrimPrefix(strings.TrimPrefix(rest, "tree"), "/"))
+	case strings.HasPrefix(rest, "archive/"):
+		s.handleArchive(w, r, repo, strings.TrimPrefix(rest, "archive/"))
 	case strings.HasPrefix(rest, "raw/"):
 		s.handleRaw(w, r, repo, strings.TrimPrefix(rest, "raw/"))
 	case strings.HasPrefix(rest, "commit/"):
@@ -183,6 +191,7 @@ func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 
 type summaryData struct {
 	Empty      bool
+	Default    string // the default branch, for the download links
 	Commits    []gitrepo.Commit
 	Branches   int
 	Tags       int
@@ -206,6 +215,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, repo *git
 	if branches, tags, err := gitrepo.Refs(ctx, repo.Dir); err == nil {
 		data.Branches, data.Tags = len(branches), len(tags)
 	}
+	data.Default = gitrepo.DefaultBranch(ctx, repo.Dir)
 	if readme, _ := gitrepo.SpecialFilesAt(ctx, repo.Dir, commit); readme != "" {
 		data.ReadmeName = readme
 		if size, err := gitrepo.BlobSize(ctx, repo.Dir, commit, readme); err == nil && size <= maxReadmeSize {
