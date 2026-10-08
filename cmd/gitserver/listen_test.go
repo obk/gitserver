@@ -1,10 +1,13 @@
 package main
 
 import (
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"syscall"
 	"testing"
 )
 
@@ -77,9 +80,18 @@ func TestSystemdListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// systemd hands over a descriptor nothing else owns, and systemdListener
+	// closes it. Give it a copy: if f still owned the same number, f would
+	// close it a second time when garbage-collected, by then maybe another
+	// test's file (seen as "bad file descriptor" in TestFsck's cleanup).
+	fd, err := syscall.Dup(int(f.Fd()))
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("LISTEN_PID", pid)
 	t.Setenv("LISTEN_FDS", "1")
-	l, err := systemdListener(pid, "1", int(f.Fd()))
+	l, err := systemdListener(pid, "1", fd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,4 +109,17 @@ func TestSystemdListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
+
+	// Nothing closes a descriptor twice: a file opened now (which may get
+	// a number freed above) survives garbage collection.
+	other, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	runtime.GC()
+	runtime.GC()
+	if _, err := other.Readdirnames(1); err != nil && err != io.EOF {
+		t.Fatalf("a descriptor was closed twice: %v", err)
+	}
 }
