@@ -72,8 +72,6 @@ update() {
 		echo "Already up to date: ${new#gitserver }. To reinstall it anyway: gitserverctl update -f"
 		exit 0
 	fi
-	echo "Updating ${old#gitserver } -> ${new#gitserver }"
-	echo
 	sh bundle/deploy/install.sh
 }
 
