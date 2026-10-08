@@ -36,7 +36,7 @@
 </ul>
 </div>
 </header>{{end}}
-{{else if or (eq .Tab "keys") (eq .Tab "password") (eq .Tab "2fa") (eq .Tab "security") (eq .Tab "invites") (eq .Tab "audit")}}<header class="header-tabbed">
+{{else if or (eq .Tab "keys") (eq .Tab "password") (eq .Tab "2fa") (eq .Tab "security") (eq .Tab "invites") (eq .Tab "audit") (eq .Tab "usage")}}<header class="header-tabbed">
 <div class="container">
 <h2>~{{.User.Name}}</h2>
 <p class="desc">Account settings</p>
@@ -46,7 +46,8 @@
 <li><a href="/settings/2fa" class="{{if eq .Tab "2fa"}}active{{end}}">two-factor</a></li>
 <li><a href="/settings/security" class="{{if eq .Tab "security"}}active{{end}}">security</a></li>
 {{if .User.Admin}}<li><a href="/settings/invites" class="{{if eq .Tab "invites"}}active{{end}}">invites</a></li>
-<li><a href="/settings/audit" class="{{if eq .Tab "audit"}}active{{end}}">audit log</a></li>{{end}}
+<li><a href="/settings/audit" class="{{if eq .Tab "audit"}}active{{end}}">audit log</a></li>
+<li><a href="/settings/usage" class="{{if eq .Tab "usage"}}active{{end}}">disk</a></li>{{end}}
 </ul>
 </div>
 </header>

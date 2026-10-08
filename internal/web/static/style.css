@@ -126,6 +126,9 @@ footer.container { color: var(--muted); font-size: .8rem; padding-top: 3rem; pad
 .success p:first-child { margin-top: 0; }
 .notice { background: var(--code-bg); border-color: var(--border); color: var(--muted); }
 .ok { color: var(--add); }
+table.list .num { text-align: right; white-space: nowrap; }
+table.list tr.total td { border-top: 2px solid var(--border); }
+meter.disk { width: 100%; max-width: 32rem; height: 1rem; }
 
 /* Repository index */
 .repo-item { padding: .9rem 0; border-bottom: 1px solid var(--border); }

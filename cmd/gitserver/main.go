@@ -53,6 +53,7 @@ Usage:
   gitserver ssh-keys USER TYPE KEY                    sshd AuthorizedKeysCommand (see deploy/)
   gitserver ssh-serve USER                            forced command for SSH keys
   gitserver backup FILE                               consistent snapshot of the database
+  gitserver fsck                                      check every repository with git fsck (weekly timer)
   gitserver demo [-listen ADDR]                       throwaway local server with sample data
   gitserver update [-f] [VERSION]                     on an installed server: download the newest
                                                       release and install it (runs gitserverctl update)
@@ -89,6 +90,8 @@ func main() {
 		err = cmdDemo(os.Args[2:])
 	case "backup":
 		err = cmdBackup(os.Args[2:])
+	case "fsck":
+		err = cmdFsck(os.Args[2:])
 	case "update":
 		err = cmdUpdate(os.Args[2:])
 	case "version":
@@ -357,11 +360,12 @@ func cmdSSHKeys(args []string) error {
 // cmdSSHServe: gitserver ssh-serve USER, the forced command (see sshgit.Serve).
 func cmdSSHServe(args []string) error {
 	fs, data := newFlagSet("ssh-serve")
+	key := fs.String("key", "", "ID of the SSH key used (recorded as its last use)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("invalid forced command")
 	}
-	return sshgit.Serve(*data, fs.Arg(0))
+	return sshgit.Serve(*data, fs.Arg(0), *key)
 }
 
 func cmdBackup(args []string) error {

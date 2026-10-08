@@ -1,6 +1,6 @@
 [Unit]
 Description=gitserver
-Documentation=file:///usr/local/share/doc/gitserver/README.md
+Documentation=file:///usr/local/share/doc/gitserver/WIKI.md
 # The listening socket comes from gitserver.socket (-listen systemd).
 Requires=gitserver.socket
 After=network.target gitserver.socket

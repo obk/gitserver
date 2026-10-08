@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"go-git-server/internal/account"
 	"go-git-server/internal/sshgit"
@@ -16,6 +17,8 @@ type keysData struct {
 	Notice string
 	Input  string
 	Host   string
+	// When each key last connected, by key ID; missing if never.
+	LastUsed map[string]time.Time
 }
 
 func (s *Server) keysPage(w http.ResponseWriter, r *http.Request, status int, data keysData) {
@@ -25,6 +28,9 @@ func (s *Server) keysPage(w http.ResponseWriter, r *http.Request, status int, da
 		return
 	}
 	data.Keys = u.SSHKeys
+	if data.LastUsed, err = s.store.KeysLastUsed(u.Name); err != nil {
+		log.Printf("keys page: user=%q: %v", u.Name, err)
+	}
 	data.Host = s.sshHost(r)
 	p := s.newPage(r, "SSH keys", data)
 	p.Tab = "keys"

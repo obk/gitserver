@@ -165,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/invites", s.requireAdmin(s.handleInviteCreate))
 	mux.HandleFunc("POST /settings/invites/revoke", s.requireAdmin(s.handleInviteRevoke))
 	mux.HandleFunc("GET /settings/audit", s.requireAdmin(s.handleAudit))
+	mux.HandleFunc("GET /settings/usage", s.requireAdmin(s.handleUsage))
 	mux.HandleFunc("GET /{owner}", s.handleUserPage)
 	mux.HandleFunc("GET /{owner}/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/"+url.PathEscape(r.PathValue("owner")), http.StatusMovedPermanently)

@@ -290,6 +290,15 @@ var auditSchema = []string{
 	) STRICT`,
 }
 
+// keyUsedSchema records when each SSH key was last used to connect, so
+// users can spot keys they no longer use. Added like code_alerts.
+var keyUsedSchema = []string{
+	`CREATE TABLE IF NOT EXISTS ssh_key_used (
+		key_id TEXT PRIMARY KEY REFERENCES ssh_keys(id) ON DELETE CASCADE,
+		at     INTEGER NOT NULL
+	) STRICT`,
+}
+
 // maxAudit is how many audit log entries are kept.
 const maxAudit = 1000
 
@@ -348,7 +357,10 @@ func (s *Store) migrate(dataDir string) error {
 		if err := s.ensureTable("logins", loginsSchema); err != nil {
 			return err
 		}
-		return s.ensureTable("audit_log", auditSchema)
+		if err := s.ensureTable("audit_log", auditSchema); err != nil {
+			return err
+		}
+		return s.ensureTable("ssh_key_used", keyUsedSchema)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -365,7 +377,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema, auditSchema) {
+		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema, auditSchema, keyUsedSchema) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -677,6 +689,34 @@ func (s *Store) AuditLog(n int) ([]AuditEntry, error) {
 	return list, rows.Err()
 }
 
+// TouchKey records that user's key keyID was just used. Keys of other
+// users are ignored.
+func (s *Store) TouchKey(user, keyID string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO ssh_key_used (key_id, at) SELECT id, ? FROM ssh_keys WHERE id = ? AND user = ?
+		ON CONFLICT (key_id) DO UPDATE SET at = excluded.at`, at.Unix(), keyID, user)
+	return err
+}
+
+// KeysLastUsed returns when each of user's keys was last used, by key ID.
+// Keys never used are missing.
+func (s *Store) KeysLastUsed(user string) (map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT u.key_id, u.at FROM ssh_key_used u JOIN ssh_keys k ON k.id = u.key_id WHERE k.user = ?`, user)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	used := map[string]time.Time{}
+	for rows.Next() {
+		var id string
+		var at int64
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, err
+		}
+		used[id] = fromUnix(at)
+	}
+	return used, rows.Err()
+}
+
 // NameUsed reports whether name belongs, or once belonged, to an account.
 func (s *Store) NameUsed(name string) (bool, error) {
 	var n int
@@ -738,11 +778,39 @@ func (s *Store) Update(name string, fn func(u *User) error) error {
 		if err != nil {
 			return err
 		}
-		// Replace the key list with whatever fn left in it.
-		if _, err := tx.Exec(`DELETE FROM ssh_keys WHERE user = ?`, name); err != nil {
+		// Make the key list whatever fn left in it. Keys that stay are
+		// left alone, so their last-used times (ssh_key_used) survive.
+		keep := map[string]bool{}
+		for _, k := range u.SSHKeys {
+			keep[k.ID] = true
+		}
+		rows, err := tx.Query(`SELECT id FROM ssh_keys WHERE user = ?`, name)
+		if err != nil {
 			return err
 		}
+		var stored []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			stored = append(stored, id)
+		}
+		rows.Close()
+		had := map[string]bool{}
+		for _, id := range stored {
+			had[id] = true
+			if !keep[id] {
+				if _, err := tx.Exec(`DELETE FROM ssh_keys WHERE id = ?`, id); err != nil {
+					return err
+				}
+			}
+		}
 		for _, k := range u.SSHKeys {
+			if had[k.ID] {
+				continue
+			}
 			if err := insertKey(tx, name, k); err != nil {
 				return err
 			}

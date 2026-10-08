@@ -118,7 +118,13 @@ func AuthorizedKeys(w io.Writer, dataDir, sshUser string, args []string) error {
 	if err != nil {
 		return nil
 	}
-	line, err := authorizedKeyLine(dataDir, u.Name, pub)
+	keyID := ""
+	for _, k := range u.SSHKeys {
+		if k.Fingerprint == ssh.FingerprintSHA256(pub) {
+			keyID = k.ID
+		}
+	}
+	line, err := authorizedKeyLine(dataDir, u.Name, keyID, pub)
 	if err != nil {
 		return err
 	}
@@ -126,9 +132,14 @@ func AuthorizedKeys(w io.Writer, dataDir, sshUser string, args []string) error {
 	return nil
 }
 
-var safePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+var (
+	safePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	keyIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+)
 
-func authorizedKeyLine(dataDir, user string, pub ssh.PublicKey) (string, error) {
+// authorizedKeyLine is the line sshd uses for user's key: the forced
+// command names the user and, so its last use can be recorded, the key.
+func authorizedKeyLine(dataDir, user, keyID string, pub ssh.PublicKey) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -144,6 +155,9 @@ func authorizedKeyLine(dataDir, user string, pub ssh.PublicKey) (string, error) 
 		return "", errors.New("unsafe characters in binary path, data path or user name")
 	}
 	cmd := fmt.Sprintf("%s ssh-serve -data %s %s", exe, data, user)
+	if keyIDRe.MatchString(keyID) {
+		cmd = fmt.Sprintf("%s ssh-serve -data %s -key %s %s", exe, data, keyID, user)
+	}
 	return fmt.Sprintf(`restrict,command="%s" %s`, cmd, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))), nil
 }
 
@@ -182,11 +196,8 @@ func AcquireUserSlot(dataDir, user string) (fd int, ok bool, err error) {
 
 // freeDisk returns the bytes available to unprivileged users on dir's filesystem.
 func freeDisk(dir string) (uint64, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		return 0, err
-	}
-	return st.Bavail * uint64(st.Bsize), nil
+	free, _, err := gitrepo.DiskSpace(dir)
+	return free, err
 }
 
 var gitServices = map[string]string{
@@ -214,8 +225,10 @@ func parseSSHCommand(cmd string) (service, owner, repo string, err error) {
 
 // Serve is the forced command for every SSH key of user name. It never
 // runs a shell.
-func Serve(dataDir, name string) error {
-	if !account.UserNameRe.MatchString(name) {
+// Serve handles one SSH connection of user name, made with the key keyID
+// ("" if unknown).
+func Serve(dataDir, name, keyID string) error {
+	if !account.UserNameRe.MatchString(name) || (keyID != "" && !keyIDRe.MatchString(keyID)) {
 		return errors.New("invalid forced command")
 	}
 	audit := func(format string, a ...any) {
@@ -232,6 +245,11 @@ func Serve(dataDir, name string) error {
 	u, err := st.Get(name)
 	if err != nil {
 		return errors.New("this key is not registered to any account")
+	}
+	if keyID != "" {
+		if err := st.TouchKey(u.Name, keyID, time.Now()); err != nil {
+			audit("recording key use user=%s: %v", u.Name, err)
+		}
 	}
 	orig := os.Getenv("SSH_ORIGINAL_COMMAND")
 	if orig == "" {

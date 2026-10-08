@@ -5,9 +5,10 @@
 {{if not .Keys}}<div class="alert"><b>Add an SSH key to continue.</b> Your account has none yet.</div>{{end}}
 {{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
 {{if .Keys}}<table class="list">
-<thead><tr><th>Key</th><th>Added</th><th></th></tr></thead>
+<thead><tr><th>Key</th><th>Added</th><th>Last used</th><th></th></tr></thead>
 <tbody>
 {{range .Keys}}<tr><td><code>{{.Fingerprint}}</code>{{if .Comment}}<br><small class="muted">{{.Comment}}</small>{{end}}</td><td><span title="{{datefull .Added}}">{{ago .Added}}</span></td>
+<td>{{$used := index $.Data.LastUsed .ID}}{{if $used.IsZero}}<span class="muted">never</span>{{else}}<span title="{{datefull $used}}">{{ago $used}}</span>{{end}}</td>
 <td class="actions">{{if gt (len $.Data.Keys) 1}}<form method="post" action="/settings/keys/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>{{else}}<small class="muted">last key</small>{{end}}</td></tr>
 {{end}}</tbody>
 </table>{{end}}

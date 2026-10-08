@@ -23,6 +23,9 @@
 set -eu
 
 ANUBIS_VERSION=${ANUBIS_VERSION:-1.27.0}
+# systemd units of gitserver's background jobs, and the units that start them.
+JOB_UNITS="gitserver-fsck.service gitserver-fsck.timer"
+JOB_TRIGGERS="gitserver-fsck.timer"
 LOGFILE=/var/log/gitserver-install.log
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -495,6 +498,17 @@ if put "$HERE/gitserver.socket" /etc/systemd/system/gitserver.socket 0644; then
 else
 	same "socket unit unchanged"
 fi
+# Background jobs, run by timers as the git user: the weekly git fsck.
+CH_JOBS=0
+for unit in $JOB_UNITS; do
+	put "$HERE/$unit" "/etc/systemd/system/$unit" 0644 && CH_UNIT=1 CH_JOBS=1
+done
+if [ "$CH_JOBS" = 1 ]; then
+	ok "background job units updated (weekly git fsck)"
+	changed "job units"
+else
+	same "background job units unchanged"
+fi
 
 # ---------------------------------------------------------------- anubis
 
@@ -708,6 +722,8 @@ fi
 step "Services"
 [ "$CH_UNIT" = 1 ] && systemctl daemon-reload
 systemctl enable gitserver.socket gitserver.service anubis@gitserver.service caddy.service >>"$LOGFILE" 2>&1
+# Timers (and path units) start their jobs; enabling is a no-op if they are.
+systemctl enable --now $JOB_TRIGGERS >>"$LOGFILE" 2>&1 || warn "could not enable $JOB_TRIGGERS; see $LOGFILE"
 RESTARTED=""
 restart() { # restart UNIT REASON
 	systemctl restart "$1" || die "$1 failed to restart; see: journalctl -u $1"
