@@ -258,6 +258,13 @@ Go to `https://git.example.com/login` and enter username, password and the 6-dig
 
 The first visit to any page may briefly show Anubis' "Making sure you're not a bot!" page. It needs JavaScript once, then sets a cookie valid for 7 days. The gitserver pages themselves use no JavaScript.
 
+### Profile
+
+**Settings → profile.** Your page, `https://git.example.com/~you`, can show a picture and a link to your website. Anyone who can open the page sees them, logged in or not.
+
+- **Website:** an `http` or `https` address, up to 200 characters. `example.com` is saved as `https://example.com`. Leave the field empty to remove the link.
+- **Picture:** PNG, JPEG or GIF (the first frame), up to 2 MiB. The middle square is used and scaled to 256×256. Phone photos are turned upright. The server keeps only a new PNG drawn from the pixels, so location, camera details and anything else in the file are gone. **Remove picture** deletes it.
+
 ### SSH keys
 
 **Settings → SSH keys.** Paste the contents of `~/.ssh/id_ed25519.pub`:
@@ -334,14 +341,14 @@ Both need your current password. Accounts created with `gitserverctl user add` s
 
 **Settings → audit log** lists the changes to your account, newest first, with when and from which IP address:
 
-- what you did: SSH keys added or deleted, password changes, new authenticators and recovery codes, invites created or revoked, your signup
+- what you did: SSH keys added or deleted, profile picture and website changes, password changes, new authenticators and recovery codes, invites created or revoked, your signup
 - what was done to your account by the server's administrator with `gitserverctl` (shown as "command line", with the name of whoever ran `sudo`): user created, password or authenticator reset, admin rights given or removed, keys added or deleted
 
 Only you see your list; admins don't see other people's. Logins are in your [login history](#sessions-and-logins). Repository events aren't in it.
 
 ### Deleting your account
 
-At the bottom of **Settings → security**. Type your user name and enter your password and an authenticator (or recovery) code. Your account, SSH keys, unused invites **and all your repositories, private and public, are deleted at once**; this can't be undone, so clone anything you want to keep first. Your user name stays reserved for good, so nobody can take your place. The only admin can't delete their account; make someone else an admin first.
+At the bottom of **Settings → security**. Type your user name and enter your password and an authenticator (or recovery) code. Your account, profile, SSH keys, unused invites **and all your repositories, private and public, are deleted at once**; this can't be undone, so clone anything you want to keep first. Your user name stays reserved for good, so nobody can take your place. The only admin can't delete their account; make someone else an admin first.
 
 ### Password
 
@@ -377,6 +384,7 @@ sudo gitserverctl user admin NAME true|false          # grant/revoke admin (= ma
 sudo gitserverctl user key list NAME                  # SSH keys with IDs and fingerprints
 sudo gitserverctl user key add NAME 'ssh-ed25519 AAAA… comment'
 sudo gitserverctl user key del NAME KEY-ID
+sudo gitserverctl user clear-profile NAME             # remove their profile picture and website
 sudo gitserverctl user del NAME                       # delete the account (repos stay on disk)
 ```
 
@@ -427,7 +435,7 @@ Back up three things:
 | What | Where | How |
 |---|---|---|
 | Repositories | `/var/lib/gitserver/repos/` | copy the directory (rsync, restic, borg, …) |
-| Database (users, keys, invites) | `/var/lib/gitserver/gitserver.db` | `sudo gitserverctl backup /var/lib/gitserver/backup-$(date +%F).db`, then copy that file |
+| Database (users, keys, invites, profiles) | `/var/lib/gitserver/gitserver.db` | `sudo gitserverctl backup /var/lib/gitserver/backup-$(date +%F).db`, then copy that file |
 | **2FA key** | `/etc/gitserver/secret.key` | once, into your password manager, **separately** from the backups |
 
 `gitserverctl backup` writes a consistent snapshot while the server runs. Don't just copy `gitserver.db`: recent changes may still be in `gitserver.db-wal`. Backup files are created with mode `0600`.
@@ -454,6 +462,7 @@ If the key doesn't match the database, gitserver refuses to start and says so.
 
 | | Anonymous | Logged-in user | Owner |
 |---|---|---|---|
+| See a user's page, with their picture and website | ✔ | ✔ | ✔ |
 | Public repo: browse, search, compare, Atom feeds | ✔ | ✔ | ✔ |
 | Public repo: clone over HTTPS | ✔ | ✔ | ✔ |
 | Public repo: clone over SSH | needs an account | ✔ | ✔ |
@@ -475,8 +484,8 @@ Every claim below links to the code that implements it. On this server and on Gi
 
 - **Passwords** are hashed with **argon2id** (64 MiB, 3 passes, 4 lanes, 16-byte random salt), the algorithm OWASP and RFC 9106 recommend. The plaintext is never stored or logged. Unknown usernames are checked against a dummy hash, so response timing doesn't reveal which accounts exist. At most 4 hashes run at once, and a request waits at most 5 s for a slot before it gets a "server busy" page, so a login flood can't queue up without limit. Code: [`argonWait`](internal/account/password.go#L34), [`argonTime`](internal/account/password.go#L21), [`HashPassword`](internal/account/password.go#L47), [`CheckPassword`](internal/account/password.go#L69), [`DummyHash`](internal/account/password.go#L104), [`argonSem`](internal/account/password.go#L32).
 - **Two-factor authentication** (TOTP, RFC 6238) is required for everyone. Codes allow ±30 s of clock skew, and each code works only once. The code is only checked after the password is correct. Code: [`CheckTOTP`](internal/account/totp.go#L46), [`totpSkew`](internal/account/totp.go#L20), [`authenticate`](internal/web/login.go#L148).
-- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L613).
-- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L595), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
+- **Sessions and login history:** users can see their active sessions and end any of them (by a random reference, never the session cookie, and only their own), and see their last 20 logins with time, IP address, browser and method. The previous login is shown once after each login. The history is stored in the database, so it survives restarts, and it's deleted with the account. Code: [`list`](internal/web/session.go#L126), [`deleteRef`](internal/web/session.go#L145), [`recordLogin`](internal/web/login.go#L125), [`RecordLogin`](internal/store/store.go#L635).
+- **Recovery codes** for a lost phone: 10 per account, each 16 random characters (80 bits), usable once, and only together with the password. Only a SHA-256 hash bound to the username is stored, and a wrong one counts like a wrong 2FA code. They're shown once and kept in memory only until then. Setting up a new authenticator or making new codes needs the current password. Code: [`NewRecoveryCodes`](internal/account/recovery.go#L22), [`HashRecoveryCode`](internal/account/recovery.go#L53), [`UseRecoveryCode`](internal/store/store.go#L617), [`takeNewCodes`](internal/web/session.go#L73), [`checkCurrentPassword`](internal/web/twofactor.go#L105).
 - **2FA secrets are encrypted** with AES-256-GCM. The key lives in `/etc/gitserver/secret.key` (root only), never in the database: Code: [`SealTOTP`](internal/account/secretbox.go#L56), [`OpenTOTP`](internal/account/secretbox.go#L65).
   - the service receives it through systemd `LoadCredential`, and the `git` user can't read the file Code: [`LoadCredential`](deploy/gitserver.service#L15), [`secret.key`](deploy/install.sh#L556), [`run`](deploy/gitserverctl#L18).
   - each secret is bound to its username, so it can't be moved into another account Code: [`totpAD`](internal/account/secretbox.go#L54).
@@ -484,15 +493,15 @@ Every claim below links to the code that implements it. On this server and on Gi
   - gitserver refuses to start with a missing or wrong key, instead of silently breaking logins Code: [`LoadSecretBox`](internal/store/secretkey.go#L40).
   - old plaintext secrets are encrypted automatically and wiped from the database file Code: [`EncryptTOTPSecrets`](internal/store/secretkey.go#L120), [`purgeFreedPages`](internal/store/store.go#L157).
 - **Brute force:** after 10 failed attempts in 15 minutes, a client gets HTTP 429. Wrong passwords count **per IP** (per /64 for IPv6). Only wrong 2FA codes **after a correct password** count per account, so a stranger can't lock you out by guessing. Each attempt counts against the IP before the password is checked, so parallel requests can't get past the limit. Code: [`take`](internal/web/ratelimit.go#L48), [`newLimiter`](internal/web/ratelimit.go#L21), [`ipKey`](internal/web/middleware.go#L79), [`passwordOK`](internal/web/login.go#L65).
-- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L549), [`TakeCodeFailures`](internal/store/store.go#L557).
+- **Warning about a known password:** wrong 2FA codes entered with the correct password mean someone may know it. Instead of locking the account (which would let that person lock you out), your next login opens the password page and says how many wrong codes were tried since when. The counts are stored in the database, so restarting the server doesn't hide an attack; they're deleted with the account. Code: [`codeAlertsSchema`](internal/store/store.go#L240), [`AddCodeFailure`](internal/store/store.go#L571), [`TakeCodeFailures`](internal/store/store.go#L579).
 - **Sessions:** server-side, with 256-bit random IDs: Code: [`create`](internal/web/session.go#L85).
-  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L297).
+  - the cookie is `__Host-` prefixed, `Secure`, `HttpOnly` and `SameSite=Strict` Code: [`startSession`](internal/web/session.go#L307).
   - sessions last at most 12 h, or 2 h idle, and get a fresh ID at every login Code: [`sessionMaxAge`](internal/web/session.go#L18).
   - they end immediately when the password or 2FA secret changes, even if changed from the command line Code: [`credentialFingerprint`](internal/web/session.go#L58), [`withSession`](internal/web/session.go#L221).
-- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L314), [`NewCrossOriginProtection`](internal/web/server.go#L182), [`safeNext`](internal/web/login.go#L17).
+- **CSRF:** every form has a per-session token, plus Go's `http.CrossOriginProtection`. Redirects after login only go to local paths. Code: [`validCSRF`](internal/web/session.go#L324), [`NewCrossOriginProtection`](internal/web/server.go#L187), [`safeNext`](internal/web/login.go#L17).
 - **User names are used once:** every name that ever had an account is recorded, and a deleted account's name can never be taken again, so a newcomer can't inherit its repositories. A database trigger records each new name; on upgrade, existing users, invite records and repository folders are recorded too. Code: [`usedNamesSchema`](internal/store/store.go#L182), [`ErrNameUsed`](internal/store/store.go#L66).
-- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L896), [`RedeemInvite`](internal/store/store.go#L975).
-- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded; each user sees the entries about their own account, and the server operator sees all of them with `gitserverctl audit`. There are no repository names in it. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L282), [`cliAudit`](cmd/gitserver/main.go#L675).
+- **Invites** are random 192-bit codes, single-use with expiry, and only their SHA-256 hash is stored. Admin rights come from the invite, never from the signup form. Code: [`CreateInvite`](internal/store/store.go#L956), [`RedeemInvite`](internal/store/store.go#L1035).
+- **Audit log:** changes to accounts, invites and account security, from the web and the command line, are recorded; each user sees the entries about their own account, and the server operator sees all of them with `gitserverctl audit`. There are no repository names in it. Entries outlive deleted users. Code: [`auditSchema`](internal/store/store.go#L282), [`cliAudit`](cmd/gitserver/main.go#L688).
 
 ### Git
 
@@ -519,8 +528,9 @@ Every claim below links to the code that implements it. On this server and on Gi
 ### Web
 
 - **Content Security Policy** with **no scripts at all**: `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The 2FA QR code is inline SVG; syntax highlighting uses CSS classes. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`qrSVG`](internal/web/signup.go#L271), [`tokenClass`](internal/render/highlight.go#L93).
-- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L87).
+- **Other headers:** HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, cross-origin isolation headers, and `Cache-Control: no-store` on pages. Code: [`secureHeaders`](internal/web/middleware.go#L11), [`no-store`](internal/web/page.go#L89).
 - **Raw files** are served as `text/plain` with `Content-Security-Policy: sandbox`, so a repository can't host active content on your domain. Images (png, jpg, gif, webp, svg) keep their type so READMEs can show them, still sandboxed. An SVG opened directly (not as an image) is downloaded instead of shown. Code: [`handleRaw`](internal/web/repos.go#L590), [`sandbox`](internal/web/repos.go#L620), [`Content-Disposition`](internal/web/repos.go#L625), [`RawContentType`](internal/render/markdown.go#L99).
+- **Profile pictures** are never served as uploaded. The server decodes the PNG, JPEG or GIF and draws a new PNG from its pixels, so a picture can't carry a script, an SVG, a second file or EXIF data such as GPS position. The picture's size is checked before decoding, and only 2 are decoded at once, so a tiny file that claims to be huge can't use up memory. Pictures are served with `Content-Security-Policy: sandbox`. Website links must be `http` or `https` without a user name or password, and carry `rel="nofollow ugc"`. Code: [`Avatar`](internal/render/avatar.go#L37), [`maxAvatarPixels`](internal/render/avatar.go#L21), [`avatarSem`](internal/render/avatar.go#L32), [`handleAvatar`](internal/web/profile.go#L120), [`sandbox`](internal/web/profile.go#L136), [`CleanWebsite`](internal/account/website.go#L19), [`rel="me`](internal/web/templates/index.html#L5).
 - **Markdown** (READMEs, intro) is rendered without raw HTML and without `javascript:` links. External images are blocked by the CSP. Relative links in a README open the file view, like on GitHub. Code: [`Markdown`](internal/render/markdown.go#L27), [`rewriteRelative`](internal/render/markdown.go#L68).
 - **Search and compare** run git with fixed arguments: search text is passed to `git grep -F -e` as a plain string, so it can't be an option or an expensive pattern, and branch and tag names are checked like everywhere else before git sees them. Both only cover commits on a branch or tag. Results are capped in size and time. Code: [`Grep`](internal/gitrepo/git.go#L384), [`Compare`](internal/gitrepo/git.go#L449), [`validRev`](internal/gitrepo/git.go#L104).
 - **Bot protection:** Anubis in front of the web UI. Its robots.txt asks all crawlers to stay away (change `SERVE_ROBOTS_TXT` in `/etc/anubis/gitserver.env` if you want search engines). Atom feeds skip the challenge, since feed readers can't solve it. Code: [`gitserver-feeds`](deploy/anubis.botPolicies.yaml#L11), [`SERVE_ROBOTS_TXT`](deploy/anubis.env#L20), [`generic-browser`](deploy/anubis.botPolicies.yaml#L27).
@@ -589,6 +599,8 @@ The key is looked up in this order: `GITSERVER_KEY`, the systemd credential, `GI
 | Invite validity | 1, 7 or 30 days (web); any duration (CLI) |
 | Signup | 15 minutes between step 1 and the 2FA confirmation |
 | Recovery codes | 10 per account, each usable once |
+| Profile picture | PNG, JPEG or GIF up to 2 MiB and 16 megapixels; stored as a PNG of at most 256×256; 2 processed at once |
+| Website link | 200 characters, http or https |
 | Login history | the last 20 logins per account |
 | Audit log | the last 5000 entries for all users together (each user's page shows their newest 200) |
 | SSH login failures | 5 within 10 min block the address for 1 h (fail2ban) |
@@ -713,8 +725,8 @@ make bundle       # deploy bundle for ARCH (default amd64)
 |---|---|
 | `cmd/gitserver/` | the command line (`serve`, `user`, `invite`, `repo`, `backup`, `update`, `ssh-keys`, `ssh-serve`, the background jobs `fsck` and `mirror-sync`, and the pre-receive hook) and `demo` |
 | `internal/account/` | rules that need no storage: user names and the reserved-name `blocklists/`, password hashing, TOTP codes, random tokens, encryption of 2FA secrets |
-| `internal/render/` | Markdown and syntax highlighting, turned into safe HTML |
-| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log) and loading the 2FA encryption key |
+| `internal/render/` | Markdown and syntax highlighting, turned into safe HTML; profile pictures, redrawn as PNG |
+| `internal/store/` | the SQLite database (users, SSH keys, invites, used names, 2FA warnings, recovery codes, login history, audit log, profiles) and loading the 2FA encryption key |
 | `internal/outbound/` | which addresses the server may connect to for users (mirrors) |
 | `internal/gitrepo/` | repositories on disk and the git commands that read them; protected branches, mirrors, `git fsck`, disk usage |
 | `internal/sshgit/` | git over SSH: key parsing, sshd's key lookup, the forced command and its limits |

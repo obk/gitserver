@@ -1,0 +1,28 @@
+{{define "content"}}{{with .Data}}<div class="row">
+<section class="col-main">
+<h3>Profile</h3>
+<p>Your picture and website are shown on <a href="/~{{$.User.Name}}">your page</a>, to everyone who can open it.</p>
+{{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="success">{{.Notice}}</div>{{end}}
+<form method="post" action="/settings/profile" class="form narrow-left">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="website">Website</label>
+<input id="website" name="website" inputmode="url" autocapitalize="none" spellcheck="false" maxlength="200" placeholder="https://example.com" value="{{.Website}}">
+<small class="muted">Leave it empty to remove the link.</small>
+<button type="submit" class="btn">Save website &rarr;</button>
+</form>
+</section>
+<aside class="col-side">
+<h4>Profile picture</h4>
+{{if .Profile.AvatarHash}}<img class="avatar" src="/avatars/{{$.User.Name}}?v={{.Profile.AvatarHash}}" alt="Your profile picture" width="256" height="256">
+<form method="post" action="/settings/profile/avatar/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit" class="btn btn-danger btn-sm">Remove picture</button></form>
+{{else}}<p class="muted">You have no picture yet.</p>{{end}}
+<form method="post" action="/settings/profile/avatar" enctype="multipart/form-data" class="form">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label for="avatar">{{if .Profile.AvatarHash}}New picture{{else}}Picture{{end}}</label>
+<input id="avatar" name="avatar" type="file" accept="image/png,image/jpeg,image/gif" required>
+<small class="muted">PNG, JPEG or GIF, at most 2 MiB. The middle square is used, scaled to 256&times;256. Location and camera data are removed.</small>
+<button type="submit" class="btn">Upload &rarr;</button>
+</form>
+</aside>
+</div>{{end}}{{end}}

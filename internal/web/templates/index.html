@@ -1,6 +1,8 @@
 {{define "content"}}{{with .Data}}<div class="row">
 <aside class="col-side">
-{{if .Owner}}<h3>~{{.Owner}}</h3>
+{{if .Owner}}{{if .Profile.AvatarHash}}<img class="avatar" src="/avatars/{{.Owner}}?v={{.Profile.AvatarHash}}" alt="" width="256" height="256">
+{{end}}<h3>~{{.Owner}}</h3>
+{{with .Profile.Website}}<p class="website"><a href="{{.}}" rel="me nofollow ugc noopener">{{website .}}</a></p>{{end}}
 <p class="muted">{{len .Repos}} {{if eq (len .Repos) 1}}repository{{else}}repositories{{end}}{{if and $.User (ne $.User.Name .Owner)}} you can see{{end}}</p>
 {{else}}<h3>{{$.Site}}</h3>
 <p class="muted">Your repositories and everyone's public ones.</p>{{end}}

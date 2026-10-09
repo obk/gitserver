@@ -263,6 +263,12 @@ func currentSession(r *http.Request) *session {
 }
 
 func (s *Server) requireUser(h http.HandlerFunc) http.HandlerFunc {
+	return s.requireUserLimit(64<<10, h)
+}
+
+// requireUserLimit is requireUser for forms that may send more than 64 KiB
+// (file uploads): up to limit bytes.
+func (s *Server) requireUserLimit(limit int64, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if currentUser(r) == nil {
 			if r.Method == http.MethodGet {
@@ -272,7 +278,11 @@ func (s *Server) requireUser(h http.HandlerFunc) http.HandlerFunc {
 			}
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if r.ContentLength > limit {
+			s.error(w, r, http.StatusRequestEntityTooLarge, "That is too much data for this form.")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		if r.Method == http.MethodPost && !s.validCSRF(r) {
 			s.error(w, r, http.StatusForbidden, "Invalid or missing CSRF token.")
 			return

@@ -146,8 +146,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /create", s.requireUser(s.handleCreateForm))
 	mux.HandleFunc("POST /create", s.requireUser(s.handleCreate))
 	mux.HandleFunc("GET /settings", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/settings/keys", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/profile", http.StatusSeeOther)
 	})
+	mux.HandleFunc("GET /settings/profile", s.requireUser(s.handleProfile))
+	mux.HandleFunc("POST /settings/profile", s.requireUser(s.handleWebsite))
+	mux.HandleFunc("POST /settings/profile/avatar", s.requireUserLimit(render.MaxAvatarUpload+16<<10, s.handleAvatarUpload))
+	mux.HandleFunc("POST /settings/profile/avatar/delete", s.requireUser(s.handleAvatarDelete))
 	mux.HandleFunc("GET /settings/keys", s.requireUser(s.handleKeys))
 	mux.HandleFunc("POST /settings/keys", s.requireUser(s.handleKeyAdd))
 	mux.HandleFunc("POST /settings/keys/delete", s.requireUser(s.handleKeyDelete))
@@ -166,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/invites/revoke", s.requireAdmin(s.handleInviteRevoke))
 	mux.HandleFunc("GET /settings/audit", s.requireUser(s.handleAudit))
 	mux.HandleFunc("GET /settings/usage", s.requireAdmin(s.handleUsage))
+	mux.HandleFunc("GET /avatars/{user}", s.handleAvatar)
 	mux.HandleFunc("GET /{owner}", s.handleUserPage)
 	mux.HandleFunc("GET /{owner}/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/"+url.PathEscape(r.PathValue("owner")), http.StatusMovedPermanently)

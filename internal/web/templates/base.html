@@ -36,11 +36,12 @@
 </ul>
 </div>
 </header>{{end}}
-{{else if or (eq .Tab "keys") (eq .Tab "password") (eq .Tab "2fa") (eq .Tab "security") (eq .Tab "invites") (eq .Tab "audit") (eq .Tab "usage")}}<header class="header-tabbed">
+{{else if or (eq .Tab "profile") (eq .Tab "keys") (eq .Tab "password") (eq .Tab "2fa") (eq .Tab "security") (eq .Tab "invites") (eq .Tab "audit") (eq .Tab "usage")}}<header class="header-tabbed">
 <div class="container">
 <h2>~{{.User.Name}}</h2>
 <p class="desc">Account settings</p>
 <ul class="tabs">
+<li><a href="/settings/profile" class="{{if eq .Tab "profile"}}active{{end}}">profile</a></li>
 <li><a href="/settings/keys" class="{{if eq .Tab "keys"}}active{{end}}">SSH keys</a></li>
 <li><a href="/settings/password" class="{{if eq .Tab "password"}}active{{end}}">password</a></li>
 <li><a href="/settings/2fa" class="{{if eq .Tab "2fa"}}active{{end}}">two-factor</a></li>

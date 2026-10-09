@@ -486,3 +486,59 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("table not added on open: %v", err)
 	}
 }
+
+func TestProfiles(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Create(&User{Name: "alice"})
+	s.Create(&User{Name: "bob"})
+	if p, err := s.Profile("alice"); err != nil || p != (Profile{}) {
+		t.Fatalf("new user's profile: %+v %v", p, err)
+	}
+	if err := s.SetWebsite("alice", "https://alice.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAvatar("alice", []byte("png 1")); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := s.Profile("alice")
+	png, hash, _ := s.Avatar("alice")
+	if p.Website != "https://alice.example" || p.AvatarHash == "" || hash != p.AvatarHash || string(png) != "png 1" {
+		t.Fatalf("profile %+v, avatar %q %q", p, png, hash)
+	}
+	// A new picture gets a new hash, and setting one keeps the website.
+	s.SetAvatar("alice", []byte("png 2"))
+	if p2, _ := s.Profile("alice"); p2.AvatarHash == p.AvatarHash || p2.Website != p.Website {
+		t.Fatalf("after a new picture: %+v", p2)
+	}
+	s.SetAvatar("alice", nil)
+	if png, hash, err := s.Avatar("alice"); png != nil || hash != "" || err != nil {
+		t.Fatalf("removed picture still there: %q %q %v", png, hash, err)
+	}
+	if p, _ := s.Profile("bob"); p != (Profile{}) {
+		t.Fatalf("bob got alice's profile: %+v", p)
+	}
+	// Profiles belong to the account and are never created for missing users.
+	s.SetAvatar("bob", []byte("png"))
+	s.SetWebsite("nobody", "https://x.example")
+	s.Delete("bob")
+	var rows int
+	s.db.QueryRow(`SELECT count(*) FROM profiles`).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("%d profile rows, want only alice's", rows)
+	}
+
+	// Databases from before profiles get the table on open.
+	s.db.Exec(`DROP TABLE profiles`)
+	s.Close()
+	if s, err = Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetWebsite("alice", "https://a.example"); err != nil {
+		t.Fatalf("profiles table not recreated: %v", err)
+	}
+}

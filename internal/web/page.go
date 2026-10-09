@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"go-git-server/internal/account"
 	"go-git-server/internal/gitrepo"
 	"go-git-server/internal/render"
 	"go-git-server/internal/store"
@@ -24,6 +25,7 @@ var templateFuncs = template.FuncMap{
 	"refsel":   func(name string, groups []refGroup) refSelect { return refSelect{name, groups} },
 	"size":     humanSize,
 	"ev":       func(repo string, c gitrepo.Commit) eventData { return eventData{repo, c} },
+	"website":  account.WebsiteLabel,
 }
 
 type eventData struct {

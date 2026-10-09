@@ -42,6 +42,7 @@ Usage:
   gitserver user admin USER true|false                grant or revoke admin (invites)
   gitserver user key add USER 'ssh-ed25519 AAAA...'   add an SSH public key
   gitserver user key list USER | user key del USER ID
+  gitserver user clear-profile USER                   remove a user's profile picture and website
   gitserver user del USER
   gitserver user list
   gitserver invite create [-admin] [-expires 168h] [-base-url URL]
@@ -344,6 +345,18 @@ func cmdUser(args []string) error {
 			action = "admin rights removed"
 		}
 		cliAudit(st, action, name, "")
+	case "clear-profile":
+		if _, err := st.Get(name); err != nil {
+			return err
+		}
+		if err := st.SetAvatar(name, nil); err != nil {
+			return err
+		}
+		if err := st.SetWebsite(name, ""); err != nil {
+			return err
+		}
+		cliAudit(st, "profile cleared", name, "")
+		fmt.Println("Profile picture and website removed.")
 	case "del":
 		if err := st.Delete(name); err != nil {
 			return err

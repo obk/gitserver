@@ -11,6 +11,7 @@ import (
 	"go-git-server/internal/account"
 	"go-git-server/internal/gitrepo"
 	"go-git-server/internal/render"
+	"go-git-server/internal/store"
 )
 
 type landingData struct {
@@ -52,8 +53,9 @@ func (s *Server) visibleRepos(r *http.Request, owner string) ([]*gitrepo.Repo, e
 }
 
 type indexData struct {
-	Owner string // set on a user page
-	Repos []*gitrepo.Repo
+	Owner   string        // set on a user page
+	Profile store.Profile // the owner's, on a user page
+	Repos   []*gitrepo.Repo
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +92,11 @@ func (s *Server) handleUserPage(w http.ResponseWriter, r *http.Request) {
 		s.error(w, r, http.StatusInternalServerError, "Could not list repositories.")
 		return
 	}
-	p := s.newPage(r, "~"+owner, indexData{Owner: owner, Repos: repos})
+	prof, err := s.store.Profile(owner)
+	if err != nil {
+		log.Printf("profile: user=%q: %v", owner, err)
+	}
+	p := s.newPage(r, "~"+owner, indexData{Owner: owner, Profile: prof, Repos: repos})
 	p.Tab = "repos"
 	s.render(w, http.StatusOK, "index", p)
 }

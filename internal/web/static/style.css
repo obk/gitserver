@@ -286,3 +286,10 @@ summary { cursor: pointer; color: var(--link); }
 textarea { width: 100%; padding: .45rem .6rem; background: var(--bg); color: inherit; border: 1px solid var(--border); border-radius: 4px; font: .85rem/1.4 var(--mono); resize: vertical; }
 textarea:focus { outline: 2px solid var(--link); outline-offset: -1px; border-color: var(--link); }
 .danger-title { color: var(--del); margin-top: 2.5rem; }
+
+/* Profile pictures */
+img.avatar { display: block; width: 100%; max-width: 12rem; height: auto; aspect-ratio: 1; border-radius: 6px; border: 1px solid var(--border); background: var(--code-bg); margin-bottom: .75rem; }
+img.avatar + h3 { margin-top: 0; }
+.website { margin: -.25rem 0 .5rem; overflow-wrap: anywhere; }
+input[type=file] { padding: .35rem .5rem; }
+@media (max-width: 760px) { img.avatar { max-width: 8rem; } }

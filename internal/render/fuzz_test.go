@@ -38,3 +38,16 @@ func FuzzRewriteRelative(f *testing.F) {
 		}
 	})
 }
+
+// The EXIF reader walks offsets taken from the uploaded file: it must never
+// read outside it, and only ever report a valid orientation.
+func FuzzJPEGOrientation(f *testing.F) {
+	f.Add([]byte("\xff\xd8\xff\xe1\x00\x22Exif\x00\x00MM\x00\x2a\x00\x00\x00\x08\x00\x01\x01\x12\x00\x03\x00\x00\x00\x01\x00\x06\x00\x00\x00\x00\x00\x00"))
+	f.Add([]byte("\xff\xd8\xff\xe1\x00\x10Exif\x00\x00II\x2a\x00\xff\xff\xff\x7f"))
+	f.Add([]byte("\xff\xd8\xff\xe1\xff\xff"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if o := jpegOrientation(b); o < 1 || o > 8 {
+			t.Fatalf("jpegOrientation = %d", o)
+		}
+	})
+}

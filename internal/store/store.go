@@ -300,6 +300,25 @@ var keyUsedSchema = []string{
 	) STRICT`,
 }
 
+// profilesSchema holds what users show about themselves on their page: a
+// website link and a profile picture (a PNG made by render.Avatar, never
+// the uploaded file). Added like code_alerts.
+var profilesSchema = []string{
+	`CREATE TABLE IF NOT EXISTS profiles (
+		user        TEXT PRIMARY KEY REFERENCES users(name) ON DELETE CASCADE,
+		website     TEXT NOT NULL DEFAULT '',
+		avatar      BLOB,
+		avatar_hash TEXT NOT NULL DEFAULT ''
+	) STRICT`,
+}
+
+// Profile is what a user shows on their page. AvatarHash is empty when
+// they have no picture; it changes with every new picture (cache busting).
+type Profile struct {
+	Website    string
+	AvatarHash string
+}
+
 // maxAudit is how many audit log entries are kept, for all users together.
 var maxAudit = 5000 // a variable for tests
 
@@ -361,7 +380,10 @@ func (s *Store) migrate(dataDir string) error {
 		if err := s.ensureTable("audit_log", auditSchema); err != nil {
 			return err
 		}
-		return s.ensureTable("ssh_key_used", keyUsedSchema)
+		if err := s.ensureTable("ssh_key_used", keyUsedSchema); err != nil {
+			return err
+		}
+		return s.ensureTable("profiles", profilesSchema)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than this gitserver (%d); upgrade gitserver", version, schemaVersion)
@@ -378,7 +400,7 @@ func (s *Store) migrate(dataDir string) error {
 				return err
 			}
 		}
-		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema, auditSchema, keyUsedSchema) {
+		for _, stmt := range slices.Concat(usedNamesSchema, codeAlertsSchema, recoveryCodesSchema, loginsSchema, auditSchema, keyUsedSchema, profilesSchema) {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
 			}
@@ -718,6 +740,44 @@ func (s *Store) KeysLastUsed(user string) (map[string]time.Time, error) {
 		used[id] = fromUnix(at)
 	}
 	return used, rows.Err()
+}
+
+// Profile returns user's profile; a user who never set one gets an empty one.
+func (s *Store) Profile(user string) (Profile, error) {
+	var p Profile
+	err := s.db.QueryRow(`SELECT website, avatar_hash FROM profiles WHERE user = ?`, user).Scan(&p.Website, &p.AvatarHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
+	return p, err
+}
+
+// SetWebsite sets user's website link ("" removes it).
+func (s *Store) SetWebsite(user, website string) error {
+	_, err := s.db.Exec(`INSERT INTO profiles (user, website) SELECT name, ? FROM users WHERE name = ?
+		ON CONFLICT (user) DO UPDATE SET website = excluded.website`, website, user)
+	return err
+}
+
+// SetAvatar stores user's profile picture (a PNG from render.Avatar); nil
+// removes it.
+func (s *Store) SetAvatar(user string, png []byte) error {
+	hash := ""
+	if png != nil {
+		hash = account.HashToken(string(png))[:16]
+	}
+	_, err := s.db.Exec(`INSERT INTO profiles (user, avatar, avatar_hash) SELECT name, ?, ? FROM users WHERE name = ?
+		ON CONFLICT (user) DO UPDATE SET avatar = excluded.avatar, avatar_hash = excluded.avatar_hash`, png, hash, user)
+	return err
+}
+
+// Avatar returns user's profile picture and its hash, or nil if they have none.
+func (s *Store) Avatar(user string) (png []byte, hash string, err error) {
+	err = s.db.QueryRow(`SELECT avatar, avatar_hash FROM profiles WHERE user = ? AND avatar IS NOT NULL`, user).Scan(&png, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", nil
+	}
+	return png, hash, err
 }
 
 // NameUsed reports whether name belongs, or once belonged, to an account.
