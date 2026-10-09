@@ -112,8 +112,10 @@ func markMatch(line string, re *regexp.Regexp) template.HTML {
 	}
 	loc := re.FindStringIndex(line)
 	if loc == nil {
+		// #nosec G203 -- escaped
 		return template.HTML(html.EscapeString(line))
 	}
+	// #nosec G203 -- every part is escaped
 	return template.HTML(html.EscapeString(line[:loc[0]]) + "<mark>" + html.EscapeString(line[loc[0]:loc[1]]) + "</mark>" +
 		html.EscapeString(line[loc[1]:]))
 }

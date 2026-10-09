@@ -42,6 +42,7 @@ func MarkdownAt(src []byte, linkBase, imageBase, dir, query string) (template.HT
 	if err := md.Convert(src, &buf); err != nil {
 		return "", err
 	}
+	// #nosec G203 -- goldmark drops raw HTML and unsafe links (no WithUnsafe)
 	return template.HTML(buf.String()), nil
 }
 

@@ -82,6 +82,7 @@ func PreReceive(gitPath, dir string, in io.Reader, out io.Writer) error {
 		default:
 			// The pushed objects are only in the quarantine area git
 			// names in the environment, which the command inherits.
+			// #nosec G204 -- no shell; the hashes are from git itself (receive-pack writes the hook input)
 			cmd := exec.Command(gitPath, "--git-dir="+dir, "merge-base", "--is-ancestor", oldHash, newHash)
 			if cmd.Run() != nil {
 				refused = append(refused, fmt.Sprintf("%s is protected: this push would remove commits from it (a force push)", branch))

@@ -6,7 +6,7 @@ ARCH    ?= amd64
 HOST    ?=
 DOMAIN  ?=
 
-.PHONY: build test dist bundle deploy update clean
+.PHONY: build test gosec dist bundle deploy update clean
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o gitserver ./cmd/gitserver
@@ -14,6 +14,18 @@ build:
 test:
 	go vet ./...
 	go test ./...
+
+# Security linter, as in CI. Every finding it may report was reviewed: the
+# safe ones carry a "#nosec RULE -- why" comment, so anything new fails.
+# Rules left out, project-wide:
+#   G104       unchecked errors (Close, Write): a style check, not security
+#   G301 G306  0755/0644 inside the data folder, which is 0700; secrets are 0600
+#   G304       reading files by path: paths are built from checked names
+#   G504       net/http/cgi "httpoxy": only Go older than 1.6.3
+#   G505       SHA-1: TOTP (RFC 6238) requires HMAC-SHA1
+GOSEC_VERSION := v2.29.0
+gosec:
+	go run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -quiet -exclude=G104,G301,G304,G306,G504,G505 -exclude-dir=tools ./...
 
 dist:
 	mkdir -p dist

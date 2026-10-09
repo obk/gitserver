@@ -85,6 +85,7 @@ func renderTokens(tokens []chroma.Token) template.HTML {
 			b.WriteString(html.EscapeString(v))
 		}
 	}
+	// #nosec G203 -- every token is escaped; class names are constants
 	return template.HTML(b.String())
 }
 
@@ -103,6 +104,7 @@ func PlainLines(text string) []template.HTML {
 	lines := strings.Split(text, "\n")
 	out := make([]template.HTML, len(lines))
 	for i, l := range lines {
+		// #nosec G203 -- escaped
 		out[i] = template.HTML(html.EscapeString(l))
 	}
 	return out
@@ -117,6 +119,7 @@ func Diff(patch string, highlight bool) []DiffLine {
 	var out []DiffLine
 	var lexer chroma.Lexer
 	meta := func(class, text string) DiffLine {
+		// #nosec G203 -- escaped
 		return DiffLine{Class: class, HTML: template.HTML(html.EscapeString(text))}
 	}
 	for i := 0; i < len(lines); {
@@ -178,6 +181,7 @@ func renderHunk(lines []string, lexer chroma.Lexer, deadline time.Time) []DiffLi
 		if hl != nil && i < len(hl) {
 			return hl[i]
 		}
+		// #nosec G203 -- escaped
 		return template.HTML(html.EscapeString(src[i]))
 	}
 
@@ -199,6 +203,7 @@ func renderHunk(lines []string, lexer chroma.Lexer, deadline time.Time) []DiffLi
 			out = append(out, DiffLine{Class: "d", Prefix: "-", HTML: pick(oldHL, oldSrc, oi)})
 			oi++
 		default: // "\ No newline at end of file"
+			// #nosec G203 -- escaped
 			out = append(out, DiffLine{Class: "m", HTML: template.HTML(html.EscapeString(l))})
 		}
 	}

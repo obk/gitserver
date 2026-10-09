@@ -704,6 +704,7 @@ func cmdUpdate(args []string) error {
 	if _, err := os.Stat(gitserverctl); err != nil {
 		return errors.New("gitserver update works on a server set up with deploy/install.sh (" + gitserverctl + " is missing); to update by hand, see Updating in WIKI.md")
 	}
+	// #nosec G204 G702 -- fixed program; the arguments reach it as arguments, never through a shell
 	return syscall.Exec(gitserverctl, append([]string{gitserverctl, "update"}, args...), os.Environ())
 }
 

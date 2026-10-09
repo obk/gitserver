@@ -243,6 +243,7 @@ func (s *Server) handleRepo(w http.ResponseWriter, r *http.Request) {
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
+			// #nosec G710 -- target starts with this server's /~owner/name path
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 			return
 		}

@@ -56,6 +56,7 @@ func CheckTOTP(secret, code string, last int64, now time.Time) (int64, bool) {
 	matched := int64(-1)
 	for i := -totpSkew; i <= totpSkew; i++ {
 		step := cur + int64(i)
+		// #nosec G115 -- a Unix time step, always positive
 		if subtle.ConstantTimeCompare([]byte(HOTP(key, uint64(step))), []byte(code)) == 1 && step > last {
 			matched = step
 		}

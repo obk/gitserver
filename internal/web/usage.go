@@ -33,6 +33,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		data.Bytes += o.Bytes
 	}
 	if free, total, err := gitrepo.DiskSpace(s.reposDir); err == nil && total > 0 {
+		// #nosec G115 -- disk sizes are far below 2^63 bytes
 		data.Free, data.Total = int64(free), int64(total)
 		data.UsedPercent = int(100 - free*100/total)
 	}

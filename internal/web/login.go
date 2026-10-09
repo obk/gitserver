@@ -38,6 +38,7 @@ type loginData struct {
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.URL.Query().Get("next"))
 	if currentUser(r) != nil {
+		// #nosec G710 -- next was checked by safeNext
 		http.Redirect(w, r, next, http.StatusSeeOther)
 		return
 	}
@@ -207,6 +208,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(s.cookieName()); err == nil {
 		s.sessions.delete(c.Value)
 	}
+	// #nosec G124 -- Secure is off only with -insecure (local testing)
 	http.SetCookie(w, &http.Cookie{Name: s.cookieName(), Value: "", Path: "/", MaxAge: -1,
 		Secure: !s.cfg.Insecure, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)

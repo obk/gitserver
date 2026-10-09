@@ -309,6 +309,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *store.U
 		s.sessions.delete(c.Value)
 	}
 	id := s.sessions.create(u.Name, credentialFingerprint(u), notice, s.clientIP(r), r.UserAgent())
+	// #nosec G124 -- Secure is off only with -insecure (local testing)
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.cookieName(),
 		Value:    id,

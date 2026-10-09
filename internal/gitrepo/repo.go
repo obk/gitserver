@@ -160,6 +160,7 @@ func Create(reposDir, owner, name, desc string, public bool) error {
 	if _, err := os.Lstat(dir); err == nil {
 		return fmt.Errorf("a repository named %s already exists", name)
 	}
+	// #nosec G204 -- fixed arguments; dir is made from a checked repository name
 	cmd := exec.CommandContext(context.Background(), "git", "init", "--bare", "--quiet", "--initial-branch=main", dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init: %v: %s", err, out)

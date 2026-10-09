@@ -94,6 +94,7 @@ func CheckPassword(encoded, pw string) (bool, error) {
 	if !acquireArgon() {
 		return false, ErrHashBusy
 	}
+	// #nosec G115 -- the length of our own stored hash (32 bytes)
 	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
 	<-argonSem
 	return subtle.ConstantTimeCompare(got, want) == 1, nil

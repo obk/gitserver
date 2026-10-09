@@ -33,6 +33,7 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(status)
+		// #nosec G705 -- text/plain with nosniff; git shows it as "remote: ..."
 		fmt.Fprintln(w, msg)
 	}
 	sshURL := "git@" + s.sshHost(r) + ":~" + owner + "/" + name
@@ -56,6 +57,7 @@ func (s *Server) serveGitHTTP(w http.ResponseWriter, r *http.Request, owner, nam
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
+			// #nosec G710 -- target starts with this server's /~owner/name path
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 			return
 		}

@@ -63,6 +63,7 @@ func findSecretBox(dataDir string, store *Store) (*account.SecretBox, error) {
 		return account.NewSecretBox(key)
 	}
 	if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
+		// #nosec G703 -- the operator's key path (systemd credentials)
 		if b, err := os.ReadFile(filepath.Join(dir, keyCred)); err == nil {
 			key, err := account.ParseSecretKey(string(b))
 			if err != nil {
@@ -75,6 +76,7 @@ func findSecretBox(dataDir string, store *Store) (*account.SecretBox, error) {
 	if path == "" {
 		path, explicit = filepath.Join(dataDir, "secret.key"), false
 	}
+	// #nosec G703 -- the operator's key path
 	fi, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) && !explicit {
 		if n, err := store.countEncryptedTOTP(); err != nil {
@@ -82,6 +84,7 @@ func findSecretBox(dataDir string, store *Store) (*account.SecretBox, error) {
 		} else if n > 0 {
 			return nil, fmt.Errorf("%w: %s is missing, but %d account(s) have encrypted 2FA secrets; restore the key from your backup (on a server: /etc/gitserver/secret.key)", errNoKey, path, n)
 		}
+		// #nosec G703 -- the operator's key path
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return nil, err
@@ -94,6 +97,7 @@ func findSecretBox(dataDir string, store *Store) (*account.SecretBox, error) {
 		if err != nil {
 			return nil, err
 		}
+		// #nosec G706 -- the operator's key path
 		log.Printf("created TOTP encryption key %s; back it up, 2FA secrets cannot be decrypted without it", path)
 		key, _ := account.ParseSecretKey(keyHex)
 		return account.NewSecretBox(key)
@@ -104,6 +108,7 @@ func findSecretBox(dataDir string, store *Store) (*account.SecretBox, error) {
 	if fi.Mode().Perm()&0o007 != 0 {
 		return nil, fmt.Errorf("TOTP key %s is readable by other users (mode %v); run: chmod 600 %s", path, fi.Mode().Perm(), path)
 	}
+	// #nosec G703 -- the operator's key path
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errNoKey, err)

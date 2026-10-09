@@ -286,5 +286,6 @@ func qrSVG(text string) (template.HTML, error) {
 		}
 	}
 	b.WriteString(`"/></svg>`)
+	// #nosec G203 -- SVG drawn from the QR code's modules; no input text
 	return template.HTML(b.String()), nil
 }

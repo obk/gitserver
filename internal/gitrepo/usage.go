@@ -52,5 +52,6 @@ func DiskSpace(dir string) (free, total uint64, err error) {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, 0, err
 	}
+	// #nosec G115 -- block counts times block size fit easily for any real disk
 	return st.Bavail * uint64(st.Bsize), st.Blocks * uint64(st.Bsize), nil
 }

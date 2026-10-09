@@ -54,6 +54,7 @@ func AcquireGit(ctx context.Context) (release func(), err error) {
 }
 
 func Command(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	// #nosec G204 -- no shell; callers check revisions and paths first (validRev, cleanTreePath)
 	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
 	return cmd

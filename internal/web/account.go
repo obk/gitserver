@@ -66,6 +66,7 @@ func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	// no SSH key. Now its repositories.
 	s.sessions.deleteUserExcept(name, "")
 	s.totpSetups.delete(name)
+	// #nosec G124 -- Secure is off only with -insecure (local testing)
 	http.SetCookie(w, &http.Cookie{Name: s.cookieName(), Value: "", Path: "/", MaxAge: -1,
 		Secure: !s.cfg.Insecure, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	if err := gitrepo.DeleteOwner(s.reposDir, name); err != nil {

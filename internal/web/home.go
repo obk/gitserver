@@ -25,6 +25,7 @@ const defaultIntro = "Self-hosted git repositories. Browse the public projects b
 func (s *Server) intro() template.HTML {
 	src := gitrepo.ReadSmallFileN(filepath.Join(s.cfg.DataDir, "intro.md"), 64<<10)
 	if src == "" {
+		// #nosec G203 -- escaped constant
 		return template.HTML("<p>" + template.HTMLEscapeString(defaultIntro) + "</p>")
 	}
 	html, err := render.Markdown([]byte(src), "", "")

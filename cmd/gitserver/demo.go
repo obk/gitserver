@@ -127,6 +127,7 @@ gitserver demo running at http://%[1]s   (Ctrl-C to stop; all data is deleted)
 	showCode := func() {
 		step := time.Now().Unix() / account.TOTPPeriod
 		left := account.TOTPPeriod - time.Now().Unix()%account.TOTPPeriod
+		// #nosec G115 -- a Unix time step, always positive
 		fmt.Printf("  TOTP code for %s: %s  (valid %2ds)\n", demoUser, account.HOTP(totpKey, uint64(step)), left)
 	}
 	showCode()
@@ -173,6 +174,7 @@ func seedDemoRepos(dataDir string) error {
 	}
 
 	git := func(dir string, date string, args ...string) error {
+		// #nosec G204 -- the demo's own fixed git commands, no shell
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",

@@ -317,5 +317,6 @@ func Serve(dataDir, name, keyID string) error {
 	if service == "receive-pack" {
 		return receivePack(gitPath, argv, env, repo, audit)
 	}
+	// #nosec G204 G702 -- no shell; argv is one of three git commands and a checked repository path (parseSSHCommand)
 	return syscall.Exec(gitPath, argv, env)
 }

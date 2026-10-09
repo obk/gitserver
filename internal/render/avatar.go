@@ -110,6 +110,7 @@ func squareThumb(img image.Image, orientation, size int) *image.RGBA {
 					count++
 				}
 			}
+			// #nosec G115 -- averages of 16-bit color values, shifted down to 0-255
 			out.SetRGBA(i, j, color.RGBA{uint8(r / count >> 8), uint8(g / count >> 8), uint8(bl / count >> 8), uint8(a / count >> 8)})
 		}
 	}

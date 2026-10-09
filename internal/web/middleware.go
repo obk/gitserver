@@ -48,6 +48,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		}
 		// The query string is deliberately not logged.
 		// %q: the decoded path may contain newlines that would forge log lines.
+		// #nosec G706 -- the path is quoted with %q; the IP was parsed by net.ParseIP
 		log.Printf("%s %s %q %d %s", s.clientIP(r), r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
 	})
 }

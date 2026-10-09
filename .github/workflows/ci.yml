@@ -28,6 +28,8 @@ jobs:
         run: make test
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: gosec
+        run: make gosec
 
   fuzz:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -41,6 +43,7 @@ jobs:
           - { target: FuzzCleanTreePath, pkg: ./internal/web }
           - { target: FuzzSafeNext, pkg: ./internal/web }
           - { target: FuzzRewriteRelative, pkg: ./internal/render }
+          - { target: FuzzJPEGOrientation, pkg: ./internal/render }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

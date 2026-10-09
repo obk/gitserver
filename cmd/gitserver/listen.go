@@ -50,6 +50,7 @@ func unixListener(path string) (net.Listener, error) {
 	}
 	// The umask may have removed group access; the owner's group (and only
 	// it) must be able to connect.
+	// #nosec G302 -- Caddy and Anubis (group gitserver-http) must be able to connect
 	if err := os.Chmod(path, 0o660); err != nil {
 		l.Close()
 		return nil, err
